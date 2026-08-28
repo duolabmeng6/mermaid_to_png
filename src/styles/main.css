@@ -1,0 +1,373 @@
+:root {
+  --font-sans: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Inter, system-ui,
+    -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --surface: #ffffff;
+  --surface-soft: #f7f7fa;
+  --surface-hover: #f1f1f6;
+  --border: #e5e6ed;
+  --border-strong: #dadce6;
+  --text-primary: #1c233b;
+  --text-secondary: #454d66;
+  --text-muted: #697187;
+  --text-faint: #8a91a3;
+  --primary: #6464e8;
+  --primary-strong: #5553d8;
+  color: var(--text-primary);
+  background: #f4f5f8;
+  font-family: var(--font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  min-width: 320px;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}
+
+button,
+select,
+textarea {
+  font-family: inherit;
+}
+
+button:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: 3px solid rgb(100 100 232 / 20%);
+  outline-offset: 2px;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 5% 0%, rgb(113 102 233 / 7%), transparent 25%),
+    radial-gradient(circle at 95% 8%, rgb(73 166 197 / 6%), transparent 24%), #f4f5f8;
+}
+
+.app-header {
+  position: relative;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  flex: 0 0 48px;
+  padding: 0 16px;
+  border-bottom: 1px solid rgb(217 219 229 / 90%);
+  background: rgb(255 255 255 / 88%);
+  box-shadow: 0 1px 0 rgb(255 255 255 / 75%);
+  backdrop-filter: blur(14px);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  color: white;
+  border-radius: 9px;
+  background: linear-gradient(145deg, #7473f1 0%, #5451d4 72%);
+  box-shadow: 0 7px 18px rgb(78 75 199 / 24%);
+}
+
+.brand-copy h1,
+.brand-copy p {
+  margin: 0;
+}
+
+.brand-copy h1 {
+  color: #20263c;
+  font-size: 15px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.brand-copy p {
+  display: none;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.privacy-badge,
+.docs-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 9px;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.privacy-badge {
+  color: #26765e;
+  border: 1px solid #cbe8df;
+  background: #f1faf7;
+}
+
+.docs-link {
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  text-decoration: none;
+  transition: 150ms ease;
+}
+
+.docs-link:hover {
+  color: var(--primary-strong);
+  border-color: #c7c3f0;
+  background: #faf9ff;
+}
+
+.workspace {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 16px;
+}
+
+.workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(390px, 0.88fr) minmax(500px, 1.12fr);
+  gap: 14px;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+@media (min-width: 961px) {
+  .workspace-grid.is-editor-collapsed {
+    grid-template-columns: 50px minmax(0, 1fr);
+  }
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid rgb(220 222 231 / 95%);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 8px 30px rgb(32 39 70 / 6%), 0 1px 2px rgb(32 39 70 / 4%);
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 0 0 auto;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.panel-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.panel-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 33px;
+  height: 33px;
+  border-radius: 9px;
+}
+
+.panel-icon--purple {
+  color: #635ed9;
+  background: #f0efff;
+}
+
+.panel-icon--blue {
+  color: #277ea0;
+  background: #e9f7fb;
+}
+
+.panel-title,
+.panel-subtitle {
+  margin: 0;
+}
+
+.panel-title {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 720;
+}
+
+.panel-subtitle {
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spinning {
+  animation: spin 0.85s linear infinite;
+}
+
+.toast {
+  position: fixed;
+  right: 22px;
+  bottom: 20px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 11px 14px;
+  color: #30364c;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: rgb(255 255 255 / 96%);
+  box-shadow: 0 12px 34px rgb(25 30 58 / 16%);
+  backdrop-filter: blur(12px);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.toast-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #2db184;
+  box-shadow: 0 0 0 3px #d9f2e9;
+}
+
+.toast--error {
+  color: #8e2b3d;
+  border-color: #efc2ca;
+  background: rgb(255 247 248 / 97%);
+}
+
+.toast--error .toast-dot {
+  background: #d94b61;
+  box-shadow: 0 0 0 3px #f7dfe3;
+}
+
+.toast-enter-active,
+.toast-leave-active {
+  transition: 180ms ease;
+}
+
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 960px) {
+  body {
+    overflow: auto;
+  }
+
+  .app-shell {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+
+  .workspace {
+    overflow: visible;
+  }
+
+  .workspace-grid {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+
+  .panel {
+    min-height: 520px;
+  }
+}
+
+@media (max-width: 640px) {
+  .app-header {
+    gap: 10px;
+    padding: 0 14px;
+  }
+
+  .brand-copy p,
+  .privacy-badge,
+  .docs-link span {
+    display: none;
+  }
+
+  .docs-link {
+    width: 34px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .workspace {
+    padding: 10px;
+  }
+
+  .workspace-grid {
+    gap: 10px;
+  }
+
+  .panel {
+    border-radius: 12px;
+  }
+
+  .toast {
+    right: 16px;
+    bottom: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
