@@ -14,10 +14,14 @@
 - 规则：Mermaid 使用严格安全模式；渲染需要防抖、串行队列和 revision 校验，语法错误时保留上一次成功预览但禁用导出。
 - 规则：Mermaid 11.17 必须通过顶层 `htmlLabels: false` 生成纯 SVG 文本；已弃用的 `flowchart.htmlLabels` 会被顶层默认值遮蔽。导出前还需将 HTML 风格的 `<br>`、`<img>` 和常见空白实体转换为 XML 安全格式，避免尺寸解析失败或 `foreignObject` 污染 Canvas。
 - 规则：草稿与设置只保存在当前浏览器；存储不可用时必须明确提示，不能声称已经保存。
+- 规则：线上版本使用 GitHub Pages 托管，`main` 分支推送后由 `.github/workflows/deploy-pages.yml` 自动执行 pnpm 安装、测试、生产构建和部署；生产资源基路径固定为 `/mermaid_to_png/`，本地开发仍使用 `/`。
+- 规则：项目统一使用 `pnpm@11.11.0` 和 `pnpm-lock.yaml`；`node_modules`、`dist`、`.DS_Store` 与 `package-lock.json` 不进入仓库。
+- 规则：公开入口为 `https://duolabmeng6.github.io/mermaid_to_png/`；该 GitHub 账号配置了 Pages 自定义域名，因此标准入口会跳转到 `https://my.rongyiapi.com/mermaid_to_png/`，不要为本项目擅自移除账号级自定义域名。
 - 规则：验收报告必须明确区分静态验证与浏览器端到端验证；只有实际完成代码粘贴、预览生成、错误恢复和 PNG/SVG 下载文件检查，才能声称核心功能已经完整测试。
 - 静态验证证据：`pnpm test` 12 项通过，`pnpm run build`（含 vue-tsc）通过，本地 Vite HTTP 响应正常；11 个 Mermaid 官方主题均通过当前安装版本的运行时配置冒烟检查。这些证据本身不代表浏览器交互与下载链路已通过。
 - 浏览器验收证据：使用用户提供的 40 节点、39 条边、7 子图复杂流程图完成真实交互实测；编辑区可视尺寸 489 × 458、内容范围 1497 × 1503，逐字中文输入、Backspace、Cmd/Ctrl+Z、重做、Tab 和错误恢复均通过。预览 100% 模式可视尺寸 689 × 424、内容范围 2777 × 2201，键盘实际滚动至 240/339（增强横移实测至 480）并可一键归零；适应窗口、50%、75%、100%、125% 五档尺寸均通过。3× PNG 实际文件为 8140 × 6413，最终 SVG 通过 XML 校验且 `foreignObject=0`；孤立 `end` 错误提示、保留旧预览、禁用导出及恢复后重新启用均通过。
+- 发布验证证据：首次推送提交 `c9816c3` 后启用 Pages 的 GitHub Actions 来源，重新运行部署的 build 与 deploy 作业均成功；GitHub API 返回 `has_pages: true`，标准入口及自定义域名入口均返回 HTTP 200，页面标题为“Mermaid 图像工坊”，线上 JS/CSS 资源使用 `/mermaid_to_png/assets/` 路径。
 - 来源：用户需求、用户纠正、互联网调研与已验证实现。
 - 任务锚点：直接对话
 - 首次记录：2026-08-28
-- 最后确认：2026-08-28
+- 最后确认：2026-08-29
