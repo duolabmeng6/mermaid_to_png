@@ -2,7 +2,11 @@
 
 一个中文界面的本地 Mermaid 图片工具。粘贴 Mermaid 代码后，可在浏览器中实时预览并导出高清 PNG 或 SVG；代码和图片不会上传到服务器。
 
-在线使用：[https://duolabmeng6.github.io/mermaid_to_png/](https://duolabmeng6.github.io/mermaid_to_png/)
+## 在线使用
+
+无需安装，直接访问：[https://my.rongyiapi.com/mermaid_to_png/](https://my.rongyiapi.com/mermaid_to_png/)
+
+[![Mermaid 图像工坊界面截图](docs/images/mermaid-to-png-screenshot.png)](https://my.rongyiapi.com/mermaid_to_png/)
 
 ## 本地运行
 
