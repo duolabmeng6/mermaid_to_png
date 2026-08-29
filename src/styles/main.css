@@ -118,7 +118,7 @@ a:focus-visible {
 }
 
 .privacy-badge,
-.docs-link {
+.header-link {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -135,7 +135,7 @@ a:focus-visible {
   background: #f1faf7;
 }
 
-.docs-link {
+.header-link {
   color: var(--text-secondary);
   border: 1px solid var(--border);
   background: var(--surface);
@@ -143,7 +143,7 @@ a:focus-visible {
   transition: 150ms ease;
 }
 
-.docs-link:hover {
+.header-link:hover {
   color: var(--primary-strong);
   border-color: #c7c3f0;
   background: #faf9ff;
@@ -333,11 +333,11 @@ a:focus-visible {
 
   .brand-copy p,
   .privacy-badge,
-  .docs-link span {
+  .header-link span {
     display: none;
   }
 
-  .docs-link {
+  .header-link {
     width: 34px;
     padding: 0;
     justify-content: center;

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { BookOpen, ShieldCheck, Workflow } from '@lucide/vue'
+import { BookOpen, FolderGit2, ShieldCheck, Workflow } from '@lucide/vue'
 import MermaidEditor from './components/MermaidEditor.vue'
 import MermaidPreview from './components/MermaidPreview.vue'
 import { defaultDiagramCode, diagramExamples } from './data/examples'
@@ -188,13 +188,26 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer))
           纯本地运行 · 数据不上传
         </span>
         <a
-          class="docs-link"
+          class="header-link"
+          href="https://github.com/duolabmeng6/mermaid_to_png"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="打开 GitHub 仓库"
+          title="GitHub 仓库"
+        >
+          <FolderGit2 :size="15" />
+          <span>GitHub 仓库</span>
+        </a>
+        <a
+          class="header-link"
           href="https://mermaid.js.org/intro/"
           target="_blank"
           rel="noopener noreferrer"
+          aria-label="打开 Mermaid 语法文档"
+          title="Mermaid 语法文档"
         >
           <BookOpen :size="15" />
-          语法文档
+          <span>语法文档</span>
         </a>
       </div>
     </header>
