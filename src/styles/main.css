@@ -166,9 +166,20 @@ a:focus-visible {
   min-height: 0;
 }
 
+.workspace-grid.has-multiple-diagrams {
+  grid-template-columns:
+    minmax(360px, 0.78fr)
+    clamp(210px, 12vw, 250px)
+    minmax(0, 1.42fr);
+}
+
 @media (min-width: 961px) {
   .workspace-grid.is-editor-collapsed {
     grid-template-columns: 50px minmax(0, 1fr);
+  }
+
+  .workspace-grid.has-multiple-diagrams.is-editor-collapsed {
+    grid-template-columns: 50px clamp(210px, 12vw, 250px) minmax(0, 1fr);
   }
 }
 
@@ -318,6 +329,10 @@ a:focus-visible {
   .workspace-grid {
     grid-template-columns: minmax(0, 1fr);
     height: auto;
+  }
+
+  .workspace-grid.has-multiple-diagrams {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .panel {

@@ -19,6 +19,8 @@ const props = defineProps<{
   isRendering: boolean
   draftSaved: boolean
   collapsed: boolean
+  diagramCount: number
+  isMarkdownInput: boolean
 }>()
 
 const emit = defineEmits<{
@@ -59,6 +61,13 @@ const status = computed(() => {
   if (props.isRendering) return { label: '正在渲染', className: 'is-loading', icon: LoaderCircle }
   if (props.errorMessage) return { label: '语法有误', className: 'is-error', icon: AlertTriangle }
   if (!props.modelValue.trim()) return { label: '等待输入', className: 'is-idle', icon: Code2 }
+  if (props.isMarkdownInput) {
+    return {
+      label: `已识别 ${props.diagramCount} 张`,
+      className: 'is-valid',
+      icon: CheckCircle2,
+    }
+  }
   return { label: '语法有效', className: 'is-valid', icon: CheckCircle2 }
 })
 
@@ -180,14 +189,14 @@ watch(
     class="panel editor-panel"
     :class="{ 'is-collapsed': isCollapsed }"
     :aria-labelledby="isCollapsed ? undefined : 'editor-title'"
-    :aria-label="isCollapsed ? 'Mermaid 代码' : undefined"
+    :aria-label="isCollapsed ? 'Markdown 或 Mermaid 源码' : undefined"
   >
     <header class="panel-header editor-header">
       <div class="panel-title-wrap">
         <span class="panel-icon panel-icon--purple"><Code2 :size="18" /></span>
         <div>
-          <h2 id="editor-title" class="panel-title">Mermaid 代码</h2>
-          <p class="panel-subtitle">粘贴或编辑图表语法</p>
+          <h2 id="editor-title" class="panel-title">Markdown / Mermaid</h2>
+          <p class="panel-subtitle">粘贴文档或直接编辑图表语法</p>
         </div>
       </div>
 
@@ -206,7 +215,7 @@ watch(
           type="button"
           aria-controls="editor-content"
           :aria-expanded="!isCollapsed"
-          :aria-label="isCollapsed ? '展开 Mermaid 代码面板' : '收起 Mermaid 代码面板'"
+          :aria-label="isCollapsed ? '展开源码面板' : '收起源码面板'"
           :title="isCollapsed ? '展开代码面板' : '收起代码面板'"
           @click="emit('update:collapsed', !isCollapsed)"
         >
@@ -250,12 +259,12 @@ watch(
           ref="textarea"
           v-model="editorValue"
           class="code-input"
-          aria-label="Mermaid 代码编辑器"
+          aria-label="Markdown 或 Mermaid 源码编辑器"
           autocomplete="off"
           autocapitalize="off"
           spellcheck="false"
           wrap="off"
-          placeholder="在这里粘贴 Mermaid 代码…"
+          placeholder="在这里粘贴 Markdown 文档或 Mermaid 代码…"
           @beforeinput="captureBeforeInputState"
           @scroll="syncGutter"
           @keydown="handleEditorShortcut"
@@ -266,7 +275,7 @@ watch(
       <div v-if="errorMessage" class="error-card" role="alert">
         <AlertTriangle :size="17" />
         <div>
-          <strong>代码暂时无法渲染</strong>
+          <strong>内容暂时无法渲染</strong>
           <pre>{{ errorMessage }}</pre>
         </div>
       </div>
@@ -276,7 +285,11 @@ watch(
           <i class="save-dot" />
           {{ draftSaved ? '草稿已保存在当前浏览器' : '浏览器未允许保存，请勿刷新页面' }}
         </span>
-        <span>{{ lineCount }} 行 · {{ characterCount }} 个字符</span>
+        <span>
+          {{ lineCount }} 行 · {{ characterCount }} 个字符{{
+            isMarkdownInput ? ` · ${diagramCount} 张图` : ''
+          }}
+        </span>
       </footer>
     </div>
   </section>

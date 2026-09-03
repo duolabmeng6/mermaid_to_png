@@ -1,10 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { strFromU8, unzipSync } from 'fflate'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   calculateCanvasSize,
+  createBatchEntryName,
   createDownloadName,
+  createZipArchive,
   prepareSvgForXmlParsing,
   resolveBackgroundColor,
 } from './exportDiagram'
+
+afterEach(() => vi.unstubAllGlobals())
 
 describe('calculateCanvasSize', () => {
   it('按指定倍率生成整数像素尺寸', () => {
@@ -30,6 +35,44 @@ describe('导出辅助方法', () => {
     expect(createDownloadName('svg', new Date(2026, 7, 28, 9, 5, 7))).toBe(
       'mermaid-20260828-090507.svg',
     )
+  })
+
+  it('为批量导出生成安全且有序的图片名', () => {
+    expect(createBatchEntryName('行业/纠偏：门店?', 0)).toBe('01-行业-纠偏：门店-.png')
+    expect(createBatchEntryName('   ', 8)).toBe('09-图表-09.png')
+  })
+
+  it('生成可读取且支持中文文件名的 ZIP', async () => {
+    let savedBlob: Blob | undefined
+    const anchor = {
+      href: '',
+      download: '',
+      style: { display: '' },
+      click: vi.fn(),
+      remove: vi.fn(),
+    }
+    vi.stubGlobal('document', {
+      createElement: () => anchor,
+      body: { appendChild: vi.fn() },
+    })
+    vi.stubGlobal('URL', {
+      createObjectURL: (blob: Blob) => {
+        savedBlob = blob
+        return 'blob:test'
+      },
+      revokeObjectURL: vi.fn(),
+    })
+    vi.stubGlobal('window', { setTimeout: vi.fn() })
+
+    const archive = await createZipArchive()
+    await archive.addFile('01-行业纠偏型.txt', '内容正常')
+    await archive.finish('全部图表.zip')
+
+    expect(anchor.download).toBe('全部图表.zip')
+    expect(anchor.click).toHaveBeenCalledOnce()
+    expect(savedBlob).toBeInstanceOf(Blob)
+    const files = unzipSync(new Uint8Array(await savedBlob!.arrayBuffer()))
+    expect(strFromU8(files['01-行业纠偏型.txt'])).toBe('内容正常')
   })
 
   it('主题背景会跟随深色主题', () => {

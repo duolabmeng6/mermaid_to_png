@@ -74,7 +74,7 @@ export function prepareSvgForXmlParsing(svgSource: string): string {
     })
 }
 
-export function createDownloadName(extension: 'png' | 'svg', now = new Date()): string {
+export function createDownloadName(extension: 'png' | 'svg' | 'zip', now = new Date()): string {
   const pad = (value: number) => String(value).padStart(2, '0')
   const stamp = [
     now.getFullYear(),
@@ -88,17 +88,31 @@ export function createDownloadName(extension: 'png' | 'svg', now = new Date()): 
   return `mermaid-${stamp}.${extension}`
 }
 
-export function downloadSvg(svgSource: string, backgroundColor: string): void {
-  const { source } = normalizeSvg(svgSource, backgroundColor)
-  const blob = new Blob([source], { type: 'image/svg+xml;charset=utf-8' })
-  downloadBlob(blob, createDownloadName('svg'))
+export function createBatchEntryName(title: string, index: number): string {
+  const safeTitle = title
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/[. ]+$/g, '')
+    .trim()
+    .slice(0, 72)
+  const number = String(index + 1).padStart(2, '0')
+  return `${number}-${safeTitle || `图表-${number}`}.png`
 }
 
-export async function downloadPng(
+export function createSvgBlob(svgSource: string, backgroundColor: string): Blob {
+  const { source } = normalizeSvg(svgSource, backgroundColor)
+  return new Blob([source], { type: 'image/svg+xml;charset=utf-8' })
+}
+
+export function downloadSvg(svgSource: string, backgroundColor: string): void {
+  saveBlob(createSvgBlob(svgSource, backgroundColor), createDownloadName('svg'))
+}
+
+export async function createPngBlob(
   svgSource: string,
   scale: PngScale,
   backgroundColor: string,
-): Promise<CanvasSize> {
+): Promise<{ blob: Blob; size: CanvasSize }> {
   const { source, dimensions } = normalizeSvg(svgSource, 'transparent')
   const canvasSize = calculateCanvasSize(dimensions, scale)
   const svgBlob = new Blob([source], { type: 'image/svg+xml;charset=utf-8' })
@@ -122,9 +136,10 @@ export async function downloadPng(
     context.imageSmoothingQuality = 'high'
     context.drawImage(image, 0, 0, canvas.width, canvas.height)
 
-    const pngBlob = await canvasToBlob(canvas)
-    downloadBlob(pngBlob, createDownloadName('png'))
-    return canvasSize
+    return {
+      blob: await canvasToBlob(canvas),
+      size: canvasSize,
+    }
   } catch (error) {
     if (error instanceof DOMException && error.name === 'SecurityError') {
       throw new Error('图表包含浏览器不允许导出的外部资源，请移除远程图片或字体后重试。')
@@ -132,6 +147,55 @@ export async function downloadPng(
     throw error
   } finally {
     URL.revokeObjectURL(objectUrl)
+  }
+}
+
+export async function downloadPng(
+  svgSource: string,
+  scale: PngScale,
+  backgroundColor: string,
+): Promise<CanvasSize> {
+  const { blob, size } = await createPngBlob(svgSource, scale, backgroundColor)
+  saveBlob(blob, createDownloadName('png'))
+  return size
+}
+
+export async function createZipArchive() {
+  const { Zip, ZipPassThrough } = await import('fflate')
+  const chunks: ArrayBuffer[] = []
+  let resolveArchive!: (blob: Blob) => void
+  let rejectArchive!: (error: Error) => void
+  const result = new Promise<Blob>((resolve, reject) => {
+    resolveArchive = resolve
+    rejectArchive = reject
+  })
+  const archive = new Zip((error, chunk, final) => {
+    if (error) {
+      rejectArchive(error)
+      return
+    }
+    const copiedChunk = new Uint8Array(chunk.byteLength)
+    copiedChunk.set(chunk)
+    chunks.push(copiedChunk.buffer)
+    if (final) resolveArchive(new Blob(chunks, { type: 'application/zip' }))
+  })
+
+  return {
+    async addFile(fileName: string, content: Blob | string) {
+      const data =
+        typeof content === 'string'
+          ? new TextEncoder().encode(content)
+          : new Uint8Array(await content.arrayBuffer())
+      const entry = new ZipPassThrough(fileName)
+      archive.add(entry)
+      entry.push(data, true)
+    },
+    async finish(fileName = createDownloadName('zip')) {
+      archive.end()
+      const blob = await result
+      saveBlob(blob, fileName)
+      return blob.size
+    },
   }
 }
 
@@ -219,7 +283,7 @@ function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   })
 }
 
-function downloadBlob(blob: Blob, fileName: string): void {
+export function saveBlob(blob: Blob, fileName: string): void {
   const objectUrl = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = objectUrl

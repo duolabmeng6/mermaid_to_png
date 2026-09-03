@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   AlertTriangle,
   FileCode2,
+  FileArchive,
   FileDown,
   Image as ImageIcon,
   ImageDown,
@@ -23,34 +24,57 @@ import type {
   MermaidTheme,
   PngScale,
 } from '../types/diagram'
+import type { DiagramLayout } from '../utils/applyDiagramLayout'
+import {
+  getNextPreviewZoom,
+  getScrollAdjustment,
+  getZoomAnchor,
+} from '../utils/previewNavigation'
 
-type PreviewZoom = 'fit' | 0.5 | 0.75 | 1 | 1.25
+type PreviewZoom = 'fit' | number
+
+interface PreviewDragState {
+  pointerId: number
+  startClientX: number
+  startClientY: number
+  startScrollLeft: number
+  startScrollTop: number
+}
+
+const PRESET_PREVIEW_ZOOMS = [0.5, 0.75, 1, 1.25]
 
 const props = defineProps<{
   svgMarkup: string
   errorMessage: string
   isRendering: boolean
   isExporting: boolean
-  exportingType: 'png' | 'svg' | ''
+  exportingType: 'png' | 'svg' | 'zip' | ''
   dimensions: DiagramDimensions | null
   theme: MermaidTheme
+  layout: DiagramLayout
   background: ExportBackground
   backgroundColor: string
   pngScale: PngScale
+  diagramCount: number
+  batchProgressLabel: string
 }>()
 
 const emit = defineEmits<{
   'update:theme': [value: MermaidTheme]
+  'update:layout': [value: DiagramLayout]
   'update:background': [value: ExportBackground]
   'update:pngScale': [value: PngScale]
   exportSvg: []
   exportPng: []
+  exportZip: []
 }>()
 
 const previewPanel = ref<HTMLElement | null>(null)
 const previewStage = ref<HTMLElement | null>(null)
+const diagramElement = ref<HTMLElement | null>(null)
 const fullscreenButton = ref<HTMLButtonElement | null>(null)
 const previewZoom = ref<PreviewZoom>(1)
+const isDraggingPreview = ref(false)
 const nativeFullscreenActive = ref(false)
 const fallbackFullscreenActive = ref(false)
 const fullscreenBusy = ref(false)
@@ -58,6 +82,8 @@ const isFullscreen = computed(
   () => nativeFullscreenActive.value || fallbackFullscreenActive.value,
 )
 let previousBodyOverflow = ''
+let previewDragState: PreviewDragState | null = null
+let zoomAnchorRevision = 0
 const themeGroups = (Object.keys(themeGroupLabels) as Array<keyof typeof themeGroupLabels>).map(
   (group) => ({
     id: group,
@@ -74,6 +100,7 @@ const showDarkBackgroundWarning = computed(
 const canExport = computed(
   () => Boolean(props.svgMarkup) && !props.errorMessage && !props.isRendering && !props.isExporting,
 )
+const canExportAll = computed(() => props.diagramCount > 1 && !props.isExporting)
 
 const baseSizeLabel = computed(() => {
   if (!props.dimensions) return '等待预览'
@@ -86,6 +113,16 @@ const outputSizeLabel = computed(() => {
   const height = Math.ceil(props.dimensions.height * props.pngScale)
   return `${width} × ${height} px`
 })
+
+const isCustomPreviewZoom = computed(
+  () =>
+    typeof previewZoom.value === 'number' &&
+    !PRESET_PREVIEW_ZOOMS.includes(previewZoom.value),
+)
+
+const previewZoomPercent = computed(() =>
+  typeof previewZoom.value === 'number' ? Math.round(previewZoom.value * 100) : 0,
+)
 
 const diagramStyle = computed(() => {
   if (!props.dimensions || previewZoom.value === 'fit') return undefined
@@ -100,6 +137,10 @@ function updateTheme(event: Event) {
   emit('update:theme', (event.target as HTMLSelectElement).value as MermaidTheme)
 }
 
+function updateLayout(event: Event) {
+  emit('update:layout', (event.target as HTMLSelectElement).value as DiagramLayout)
+}
+
 function updateBackground(event: Event) {
   emit('update:background', (event.target as HTMLSelectElement).value as ExportBackground)
 }
@@ -110,11 +151,147 @@ function updatePngScale(event: Event) {
 
 function updatePreviewZoom(event: Event) {
   const value = (event.target as HTMLSelectElement).value
-  previewZoom.value = value === 'fit' ? 'fit' : (Number(value) as PreviewZoom)
+  if (value === 'fit') {
+    cancelPendingZoomAnchor()
+    previewZoom.value = 'fit'
+    void nextTick().then(resetPreviewPosition)
+    return
+  }
+
+  const stage = previewStage.value
+  if (!stage) {
+    previewZoom.value = Number(value)
+    return
+  }
+
+  const rect = stage.getBoundingClientRect()
+  void setPreviewZoomAt(Number(value), rect.left + rect.width / 2, rect.top + rect.height / 2)
 }
 
 function resetPreviewPosition() {
   previewStage.value?.scrollTo({ left: 0, top: 0, behavior: 'auto' })
+}
+
+function getPaintedDiagramRect() {
+  const element = diagramElement.value
+  const dimensions = props.dimensions
+  if (!element || !dimensions || dimensions.width <= 0 || dimensions.height <= 0) return null
+
+  const box = element.getBoundingClientRect()
+  const scale = Math.min(box.width / dimensions.width, box.height / dimensions.height)
+  const width = dimensions.width * scale
+  const height = dimensions.height * scale
+
+  return {
+    left: box.left + (box.width - width) / 2,
+    top: box.top + (box.height - height) / 2,
+    width,
+    height,
+  }
+}
+
+async function setPreviewZoomAt(nextZoom: number, clientX: number, clientY: number) {
+  const stage = previewStage.value
+  const oldRect = getPaintedDiagramRect()
+  if (!stage || !oldRect) {
+    previewZoom.value = nextZoom
+    return
+  }
+
+  const anchor = getZoomAnchor(oldRect, clientX, clientY)
+  const currentRevision = ++zoomAnchorRevision
+  previewZoom.value = nextZoom
+  await nextTick()
+  if (currentRevision !== zoomAnchorRevision) return
+
+  const newRect = getPaintedDiagramRect()
+  if (!newRect) return
+
+  const adjustment = getScrollAdjustment(newRect, anchor, clientX, clientY)
+  stage.scrollLeft += adjustment.left
+  stage.scrollTop += adjustment.top
+}
+
+function handlePreviewWheel(event: WheelEvent) {
+  if (!event.ctrlKey || !props.svgMarkup || props.isRendering || !props.dimensions) return
+
+  const paintedRect = getPaintedDiagramRect()
+  const stage = previewStage.value
+  if (!paintedRect || !stage) return
+
+  event.preventDefault()
+  const currentZoom =
+    typeof previewZoom.value === 'number'
+      ? previewZoom.value
+      : paintedRect.width / props.dimensions.width
+  const nextZoom = getNextPreviewZoom(
+    currentZoom,
+    event.deltaY,
+    event.deltaMode,
+    stage.clientHeight,
+  )
+  if (nextZoom === currentZoom) return
+
+  void setPreviewZoomAt(nextZoom, event.clientX, event.clientY)
+}
+
+function handlePreviewPointerDown(event: PointerEvent) {
+  const stage = previewStage.value
+  const target = event.target
+  if (
+    !stage ||
+    !props.svgMarkup ||
+    props.isRendering ||
+    event.pointerType !== 'mouse' ||
+    event.button !== 0 ||
+    !event.isPrimary ||
+    !(target instanceof Element) ||
+    !target.closest('.diagram-viewport') ||
+    target.closest('a, button, input, select, textarea') ||
+    (stage.scrollWidth <= stage.clientWidth && stage.scrollHeight <= stage.clientHeight)
+  ) {
+    return
+  }
+
+  previewDragState = {
+    pointerId: event.pointerId,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    startScrollLeft: stage.scrollLeft,
+    startScrollTop: stage.scrollTop,
+  }
+  stage.setPointerCapture(event.pointerId)
+  stage.focus({ preventScroll: true })
+  event.preventDefault()
+}
+
+function handlePreviewPointerMove(event: PointerEvent) {
+  const stage = previewStage.value
+  const drag = previewDragState
+  if (!stage || !drag || event.pointerId !== drag.pointerId) return
+
+  const deltaX = event.clientX - drag.startClientX
+  const deltaY = event.clientY - drag.startClientY
+  if (!isDraggingPreview.value && Math.hypot(deltaX, deltaY) < 4) return
+
+  isDraggingPreview.value = true
+  stage.scrollLeft = drag.startScrollLeft - deltaX
+  stage.scrollTop = drag.startScrollTop - deltaY
+  event.preventDefault()
+}
+
+function stopPreviewDrag(event?: PointerEvent) {
+  const stage = previewStage.value
+  const drag = previewDragState
+  if (!drag || (event && event.pointerId !== drag.pointerId)) return
+
+  previewDragState = null
+  isDraggingPreview.value = false
+  if (stage?.hasPointerCapture(drag.pointerId)) stage.releasePointerCapture(drag.pointerId)
+}
+
+function cancelPendingZoomAnchor() {
+  zoomAnchorRevision += 1
 }
 
 async function toggleFullscreen() {
@@ -184,6 +361,8 @@ function syncFullscreenState() {
 }
 
 function resetPreviewAfterLayout(focusStage: boolean) {
+  stopPreviewDrag()
+  cancelPendingZoomAnchor()
   nextTick(() => {
     window.requestAnimationFrame(() => {
       resetPreviewPosition()
@@ -241,8 +420,10 @@ function handlePreviewKeydown(event: KeyboardEvent) {
 }
 
 watch(
-  [() => props.svgMarkup, previewZoom],
+  () => props.svgMarkup,
   async () => {
+    stopPreviewDrag()
+    cancelPendingZoomAnchor()
     await nextTick()
     resetPreviewPosition()
   },
@@ -254,6 +435,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  stopPreviewDrag()
+  cancelPendingZoomAnchor()
   document.removeEventListener('fullscreenchange', syncFullscreenState)
   if (fallbackFullscreenActive.value) {
     document.body.style.overflow = previousBodyOverflow
@@ -312,6 +495,18 @@ onBeforeUnmount(() => {
           <ImageDown v-else :size="16" />
           导出 PNG
         </button>
+        <button
+          v-if="diagramCount > 1"
+          class="button button--secondary"
+          type="button"
+          :disabled="!canExportAll"
+          title="将全部图表导出为 PNG 并打包成 ZIP"
+          @click="emit('exportZip')"
+        >
+          <LoaderCircle v-if="exportingType === 'zip'" class="spinning" :size="16" />
+          <FileArchive v-else :size="16" />
+          {{ exportingType === 'zip' && batchProgressLabel ? `打包 ${batchProgressLabel}` : '全部 ZIP' }}
+        </button>
       </div>
     </header>
 
@@ -349,6 +544,15 @@ onBeforeUnmount(() => {
       </label>
 
       <label class="select-control">
+        <span>排版</span>
+        <select aria-label="流程图排版" :value="layout" @change="updateLayout">
+          <option value="source">跟随代码</option>
+          <option value="horizontal">横版</option>
+          <option value="vertical">竖版</option>
+        </select>
+      </label>
+
+      <label class="select-control">
         <span>图片背景</span>
         <select aria-label="图片背景" :value="background" @change="updateBackground">
           <option value="theme">跟随主题</option>
@@ -375,6 +579,9 @@ onBeforeUnmount(() => {
           @change="updatePreviewZoom"
         >
           <option value="fit">适应窗口</option>
+          <option v-if="isCustomPreviewZoom" :value="previewZoom">
+            当前 {{ previewZoomPercent }}%
+          </option>
           <option :value="0.5">50%</option>
           <option :value="0.75">75%</option>
           <option :value="1">100%</option>
@@ -406,12 +613,22 @@ onBeforeUnmount(() => {
     <div
       ref="previewStage"
       class="preview-stage"
-      :class="{ 'is-transparent': backgroundColor === 'transparent' }"
+      :class="{
+        'is-transparent': backgroundColor === 'transparent',
+        'is-pannable': Boolean(svgMarkup),
+        'is-dragging': isDraggingPreview,
+      }"
       :style="backgroundColor === 'transparent' ? undefined : { backgroundColor }"
       aria-label="图片预览画布"
       aria-describedby="preview-scroll-help"
       role="region"
       tabindex="0"
+      @wheel="handlePreviewWheel"
+      @pointerdown="handlePreviewPointerDown"
+      @pointermove="handlePreviewPointerMove"
+      @pointerup="stopPreviewDrag"
+      @pointercancel="stopPreviewDrag"
+      @lostpointercapture="stopPreviewDrag"
       @keydown="handlePreviewKeydown"
     >
       <div
@@ -419,13 +636,13 @@ onBeforeUnmount(() => {
         class="diagram-viewport"
         :class="{ 'is-fit': previewZoom === 'fit' }"
       >
-        <div class="diagram" :style="diagramStyle" v-html="svgMarkup" />
+        <div ref="diagramElement" class="diagram" :style="diagramStyle" v-html="svgMarkup" />
       </div>
 
       <div v-else-if="!isRendering" class="empty-state">
         <span class="empty-icon"><FileCode2 :size="29" /></span>
         <h3>预览会显示在这里</h3>
-        <p>在左侧粘贴 Mermaid 代码，图表会自动生成。</p>
+        <p>在左侧粘贴 Markdown 文档或 Mermaid 代码，图表会自动生成。</p>
       </div>
 
       <div v-if="isRendering" class="loading-overlay" aria-live="polite">
@@ -441,10 +658,10 @@ onBeforeUnmount(() => {
 
     <footer class="preview-footer">
       <span id="preview-scroll-help" class="sr-only">
-        大图可使用滚动条、方向键和翻页键查看，按住 Shift 可加速横向移动。
+        可使用滚动条、触控板双指或鼠标拖拽移动；触控板捏合或 Ctrl 加滚轮缩放；也可使用方向键和翻页键查看。
       </span>
       <span><i class="local-dot" />所有渲染与导出都在当前浏览器中完成</span>
-      <span>SVG 为无损矢量格式</span>
+      <span>双指移动 · 捏合缩放 · 拖拽平移</span>
     </footer>
 
     <div id="preview-toast-host" class="toast-host" />
@@ -513,7 +730,14 @@ onBeforeUnmount(() => {
 .export-actions {
   display: flex;
   gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
   margin-left: auto;
+  scrollbar-width: none;
+}
+
+.export-actions::-webkit-scrollbar {
+  display: none;
 }
 
 .button {
@@ -688,6 +912,16 @@ onBeforeUnmount(() => {
   scrollbar-width: auto;
   overscroll-behavior: contain;
   background: #ffffff;
+}
+
+.preview-stage.is-pannable .diagram-viewport {
+  cursor: grab;
+}
+
+.preview-stage.is-dragging,
+.preview-stage.is-dragging .diagram-viewport {
+  cursor: grabbing;
+  user-select: none;
 }
 
 .preview-stage::-webkit-scrollbar {
@@ -910,6 +1144,7 @@ onBeforeUnmount(() => {
 
   .button {
     flex: 1;
+    min-width: max-content;
   }
 
   .settings-bar {

@@ -2,14 +2,41 @@ import { onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import mermaid from 'mermaid'
 import { getThemePreset } from '../data/themePresets'
 import type { DiagramDimensions, MermaidTheme } from '../types/diagram'
+import { applyDiagramLayout, type DiagramLayout } from '../utils/applyDiagramLayout'
 import { getSvgDimensions } from '../utils/exportDiagram'
 
 const FONT_FAMILY =
   '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", Arial, sans-serif'
 
 const RENDER_DELAY = 320
+let renderSequence = 0
+let renderQueue = Promise.resolve()
 
-export function useMermaidRenderer(code: Ref<string>, theme: Ref<MermaidTheme>) {
+export interface RenderedMermaidDiagram {
+  svg: string
+  dimensions: DiagramDimensions
+}
+
+export function renderMermaidDiagram(
+  source: string,
+  selectedTheme: MermaidTheme,
+  layout: DiagramLayout = 'source',
+): Promise<RenderedMermaidDiagram> {
+  const job = renderQueue.then(() =>
+    renderDiagram(applyDiagramLayout(source, layout), selectedTheme),
+  )
+  renderQueue = job.then(
+    () => undefined,
+    () => undefined,
+  )
+  return job
+}
+
+export function useMermaidRenderer(
+  code: Ref<string>,
+  theme: Ref<MermaidTheme>,
+  layout: Ref<DiagramLayout>,
+) {
   const svgMarkup = ref('')
   const errorMessage = ref('')
   const isRendering = ref(false)
@@ -17,8 +44,6 @@ export function useMermaidRenderer(code: Ref<string>, theme: Ref<MermaidTheme>) 
 
   let revision = 0
   let debounceTimer: number | undefined
-  let renderQueue = Promise.resolve()
-
   const scheduleRender = (immediate = false) => {
     window.clearTimeout(debounceTimer)
     const currentRevision = ++revision
@@ -35,54 +60,28 @@ export function useMermaidRenderer(code: Ref<string>, theme: Ref<MermaidTheme>) 
     const run = () => {
       const source = code.value
       const selectedTheme = theme.value
-      renderQueue = renderQueue
-        .then(() => renderDiagram(source, selectedTheme, currentRevision))
-        .catch(() => undefined)
+      const selectedLayout = layout.value
+      void renderCurrentDiagram(source, selectedTheme, selectedLayout, currentRevision)
     }
 
     if (immediate) run()
     else debounceTimer = window.setTimeout(run, RENDER_DELAY)
   }
 
-  const renderDiagram = async (
+  const renderCurrentDiagram = async (
     source: string,
     selectedTheme: MermaidTheme,
+    selectedLayout: DiagramLayout,
     currentRevision: number,
   ) => {
     if (currentRevision !== revision) return
 
     try {
-      const selectedPreset = getThemePreset(selectedTheme)
-      mermaid.initialize({
-        startOnLoad: false,
-        securityLevel: 'strict',
-        suppressErrorRendering: true,
-        theme: selectedPreset.mermaidTheme,
-        fontFamily: FONT_FAMILY,
-        htmlLabels: false,
-        themeVariables: {
-          ...selectedPreset.themeVariables,
-          fontFamily: FONT_FAMILY,
-        },
-        flowchart: {
-          useMaxWidth: true,
-        },
-        sequence: {
-          useMaxWidth: true,
-        },
-      })
-
-      if ('fonts' in document) await document.fonts.ready
-      await mermaid.parse(source)
+      const rendered = await renderMermaidDiagram(source, selectedTheme, selectedLayout)
       if (currentRevision !== revision) return
 
-      const id = `mermaid-diagram-${Date.now()}-${currentRevision}`
-      const { svg } = await mermaid.render(id, source)
-      if (currentRevision !== revision) return
-
-      const nextDimensions = getSvgDimensions(svg)
-      svgMarkup.value = svg
-      dimensions.value = nextDimensions
+      svgMarkup.value = rendered.svg
+      dimensions.value = rendered.dimensions
       errorMessage.value = ''
     } catch (error) {
       if (currentRevision !== revision) return
@@ -95,7 +94,7 @@ export function useMermaidRenderer(code: Ref<string>, theme: Ref<MermaidTheme>) 
   const renderNow = () => scheduleRender(true)
 
   onMounted(() => scheduleRender(true))
-  watch([code, theme], () => scheduleRender())
+  watch([code, theme, layout], () => scheduleRender())
 
   onBeforeUnmount(() => {
     revision += 1
@@ -108,6 +107,41 @@ export function useMermaidRenderer(code: Ref<string>, theme: Ref<MermaidTheme>) 
     isRendering,
     dimensions,
     renderNow,
+  }
+}
+
+async function renderDiagram(
+  source: string,
+  selectedTheme: MermaidTheme,
+): Promise<RenderedMermaidDiagram> {
+  const selectedPreset = getThemePreset(selectedTheme)
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    suppressErrorRendering: true,
+    theme: selectedPreset.mermaidTheme,
+    fontFamily: FONT_FAMILY,
+    htmlLabels: false,
+    themeVariables: {
+      ...selectedPreset.themeVariables,
+      fontFamily: FONT_FAMILY,
+    },
+    flowchart: {
+      useMaxWidth: true,
+    },
+    sequence: {
+      useMaxWidth: true,
+    },
+  })
+
+  if ('fonts' in document) await document.fonts.ready
+  await mermaid.parse(source)
+
+  const id = `mermaid-diagram-${Date.now()}-${++renderSequence}`
+  const { svg } = await mermaid.render(id, source)
+  return {
+    svg,
+    dimensions: getSvgDimensions(svg),
   }
 }
 
