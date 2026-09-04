@@ -25,6 +25,7 @@ import {
   deleteFlowchartNode,
   insertFlowchartEdge,
   insertFlowchartNode,
+  insertFlowchartSiblingNode,
   replaceMermaidBlockCode,
   updateFlowchartNodeLabel,
   type FlowchartNodeShape,
@@ -349,7 +350,9 @@ function insertNode(
       : relation === 'sibling'
         ? insertMindmapSibling(diagram.code, parentIndex, label, mindmapShape)
         : insertMindmapNode(diagram.code, mindmapShape, label, parentIndex)
-    : insertFlowchartNode(diagram.code, shape, label, afterNodeId)
+    : relation === 'sibling' && afterNodeId
+      ? insertFlowchartSiblingNode(diagram.code, shape, label, afterNodeId)
+      : insertFlowchartNode(diagram.code, shape, label, afterNodeId)
   if (!inserted) {
     showToast(
       mindmap
@@ -372,9 +375,11 @@ function insertNode(
       ? relation === 'sibling'
         ? '已插入脑图同级节点，可在左侧撤销。'
         : '已插入脑图子节点，可在左侧撤销。'
-      : afterNodeId
-        ? '已插入并连接新节点。'
-        : '已插入独立节点。',
+      : relation === 'sibling'
+        ? '已插入流程图同级节点，可在左侧撤销。'
+        : afterNodeId
+          ? '已插入并连接新节点。'
+          : '已插入独立节点。',
     'success',
   )
 }

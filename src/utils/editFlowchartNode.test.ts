@@ -7,6 +7,7 @@ import {
   deleteFlowchartNode,
   deleteFlowchartEdge,
   insertFlowchartNode,
+  insertFlowchartSiblingNode,
   insertFlowchartEdge,
   isEditableFlowchartNodeId,
   replaceMermaidBlockCode,
@@ -353,6 +354,59 @@ describe('流程图节点文字编辑', () => {
         'flowchart LR\n  subgraph S[分组]\n    A[起点] --> B[终点]\n    A --> newNode1{"是否继续"}\n  end',
       nodeId: 'newNode1',
     })
+  })
+
+  it('按入边复制同级关系，不把同级节点误连成当前节点的下级', () => {
+    const source = [
+      'flowchart TD',
+      '  A[上游] --> B[当前]',
+      '  A --> C[其他同级]',
+      '  B --> D[下级]',
+    ].join('\n')
+
+    expect(insertFlowchartSiblingNode(source, 'rectangle', '新同级', 'C')).toEqual({
+      source: [
+        'flowchart TD',
+        '  A[上游] --> B[当前]',
+        '  A --> newNode1',
+        '  A --> C[其他同级]',
+        '  B --> D[下级]',
+        '  newNode1["新同级"]',
+      ].join('\n'),
+      nodeId: 'newNode1',
+    })
+  })
+
+  it('识别 Mermaid 的文字箭头并按箭头上游插入同级节点', () => {
+    const source = [
+      'flowchart TD',
+      '  A[收到需求] --> B{信息完整吗？}',
+      '  B -- 是 --> C[开始实现]',
+      '  B -- 否 --> D[补充需求]',
+    ].join('\n')
+
+    expect(insertFlowchartSiblingNode(source, 'rectangle', '新同级', 'C')?.source).toBe(
+      [
+        'flowchart TD',
+        '  A[收到需求] --> B{信息完整吗？}',
+        '  B --> newNode1',
+        '  B -- 是 --> C[开始实现]',
+        '  B -- 否 --> D[补充需求]',
+        '  newNode1["新同级"]',
+      ].join('\n'),
+    )
+  })
+
+  it('没有入边时插入独立同级节点，并支持多入边', () => {
+    expect(insertFlowchartSiblingNode('flowchart TD\n  Solo[独立节点]', 'rectangle', '同级', 'Solo')).toEqual({
+      source: 'flowchart TD\n  Solo[独立节点]\n  newNode1["同级"]',
+      nodeId: 'newNode1',
+    })
+
+    const source = 'flowchart TD\n  A --> C\n  B --> C'
+    expect(insertFlowchartSiblingNode(source, 'rectangle', '并列', 'C')?.source).toBe(
+      'flowchart TD\n  A --> C\n  A --> newNode1\n  B --> C\n  B --> newNode1\n  newNode1["并列"]',
+    )
   })
 
   it('生成不冲突的节点 id，并拒绝空文字或无效锚点', () => {

@@ -33,6 +33,7 @@ import type {
 import type { DiagramLayout } from '../utils/applyDiagramLayout'
 import {
   getFlowchartEdgeFromDomId,
+  getNextFlowchartNodeId,
   getFlowchartNodeIdFromDomId,
   getFlowchartNodeLabel,
   isEditableFlowchartNodeId,
@@ -509,6 +510,14 @@ function handlePreviewPointerDown(event: PointerEvent) {
   event.preventDefault()
 }
 
+function handlePreviewClick(event: MouseEvent) {
+  if (connectionMode.value || !(event.target instanceof Element)) return
+  const node = getEditableNode(event.target)
+  if (!node || event.button !== 0 || event.defaultPrevented) return
+  if (event.target.closest('a, button, input, select, textarea')) return
+  node.focus({ preventScroll: true })
+}
+
 function toggleConnectionMode() {
   if (!canUseConnectionMode.value) return
   connectionMode.value = !connectionMode.value
@@ -881,16 +890,27 @@ function openInsertSiblingEditor(anchorNodeId = contextMenu.value?.nodeId) {
   })
 }
 
-function createMindmapKeyboardNode(
+function createKeyboardNode(
   nodeId: string,
   relation: 'child' | 'sibling',
 ) {
-  if (!isMindmapDiagram.value || !isDiagramInteractionCurrent()) return
-  const nodeIndex = getMindmapNodeIndexFromDomId(nodeId)
-  const node = nodeIndex === null ? undefined : getMindmapNodeStructure(props.activeDiagramCode)[nodeIndex]
-  const nextNodeId = node && nodeIndex !== null
-    ? `node_${nodeIndex + node.subtreeSize}`
-    : nodeId
+  if (!isDiagramInteractionCurrent() || connectionMode.value) return
+
+  let nextNodeId = nodeId
+  if (isMindmapDiagram.value) {
+    const nodeIndex = getMindmapNodeIndexFromDomId(nodeId)
+    const node = nodeIndex === null
+      ? undefined
+      : getMindmapNodeStructure(props.activeDiagramCode)[nodeIndex]
+    nextNodeId = node && nodeIndex !== null
+      ? `node_${nodeIndex + node.subtreeSize}`
+      : nodeId
+  } else if (isFlowchartSource(props.activeDiagramCode)) {
+    nextNodeId = getNextFlowchartNodeId(props.activeDiagramCode)
+  } else {
+    return
+  }
+
   setPendingNodeFocus(nextNodeId, nodeId)
   emit('insertNode', 'rectangle', '新节点', nodeId, relation)
 }
@@ -1052,7 +1072,7 @@ function prepareEditableNodes() {
       ? nodeId === 'node_0'
         ? '按 Enter 或 Tab 新建子节点，双击编辑文字'
         : '按 Enter 新建同级、按 Tab 新建子节点，双击编辑文字'
-      : '按 Enter 或空格编辑'
+      : '按 Enter 新建同级、按 Tab 新建下级，双击编辑文字'
     node.setAttribute(
       'aria-label',
       `节点：${label.replace(/\s+/g, ' ') || nodeId}；${keyboardHint}，按 Shift+F10 打开菜单`,
@@ -1361,39 +1381,26 @@ function handlePreviewKeydown(event: KeyboardEvent) {
   }
 
   const node = getEditableNode(event.target)
-  if (
-    node &&
-    isMindmapDiagram.value &&
-    !connectionMode.value &&
-    isDiagramInteractionCurrent()
-  ) {
+  if (node && !connectionMode.value && isDiagramInteractionCurrent()) {
     const nodeId = node.dataset.id
     if (!nodeId) return
     if (event.key === 'Tab' && !event.shiftKey) {
       event.preventDefault()
-      createMindmapKeyboardNode(nodeId, 'child')
+      createKeyboardNode(nodeId, 'child')
       return
     }
     if (event.key === 'Enter') {
       event.preventDefault()
-      createMindmapKeyboardNode(nodeId, nodeId === 'node_0' ? 'child' : 'sibling')
+      createKeyboardNode(
+        nodeId,
+        isMindmapDiagram.value && nodeId === 'node_0' ? 'child' : 'sibling',
+      )
       return
     }
     if (event.key === ' ') {
       event.preventDefault()
       return
     }
-  }
-
-  if (
-    !isMindmapDiagram.value &&
-    (event.key === 'Enter' || event.key === ' ') &&
-    !connectionMode.value &&
-    node
-  ) {
-    event.preventDefault()
-    openNodeEditor(node)
-    return
   }
 
   const step = event.shiftKey ? 240 : 80
@@ -1703,6 +1710,7 @@ onBeforeUnmount(() => {
       @pointerup="handlePreviewPointerUp"
       @pointercancel="handlePreviewPointerCancel"
       @lostpointercapture="handlePreviewLostPointerCapture"
+      @click="handlePreviewClick"
       @dblclick="handlePreviewDoubleClick"
       @contextmenu="handlePreviewContextMenu"
       @keydown="handlePreviewKeydown"
@@ -1770,7 +1778,7 @@ onBeforeUnmount(() => {
             ? '连接模式：从起点拖到终点，箭头指向松开位置 · 回路会改变布局 · 右键删线或左侧撤销'
             : isMindmapDiagram
               ? '脑图：Tab 立即新建子节点 · Enter 立即新建同级（根节点时新建子节点） · 双击编辑文字 · 右键管理层级 · 层级由缩进维护 · 拖拽平移'
-              : '双击节点编辑 · 开启连接模式后拖线 · 右键节点/连线管理 · 捏合缩放 · 拖拽平移'
+              : '流程图：Tab 新建下级 · Enter 新建同级 · 双击编辑文字 · 开启连接模式后拖线 · 右键节点/连线管理 · 捏合缩放 · 拖拽平移'
         }}
       </span>
     </footer>

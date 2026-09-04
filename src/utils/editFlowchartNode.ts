@@ -140,6 +140,71 @@ export function insertFlowchartNode(
   }
 }
 
+/**
+ * Returns the unique ids of nodes with an incoming edge to `nodeId`.
+ *
+ * Only edges that the existing flowchart parser can safely identify are
+ * returned; labels, directives and quoted text are ignored in the same way as
+ * the CRUD helpers below.
+ */
+export function getFlowchartParentNodeIds(source: string, nodeId: string): string[] {
+  if (!isFlowchartSource(source) || !isEditableFlowchartNodeId(nodeId)) return []
+
+  const parents: string[] = []
+  const linePattern = /[^\r\n]*(?:\r\n|\r|\n|$)/g
+  let match: RegExpExecArray | null
+
+  while ((match = linePattern.exec(source)) && match[0]) {
+    const rawLine = match[0]
+    const line = rawLine.replace(/(?:\r\n|\r|\n)$/, '')
+    if (IGNORED_LINE_PATTERN.test(line)) continue
+    const code = line.slice(0, findUnquotedToken(line, '%%'))
+
+    for (const segment of splitUnquoted(code, ';')) {
+      const tokens = findFlowchartNodeTokens(segment)
+      for (const edge of findFlowchartEdgeMatches(segment, tokens)) {
+        if (edge.to.id === nodeId && edge.from.id !== nodeId && !parents.includes(edge.from.id)) {
+          parents.push(edge.from.id)
+        }
+      }
+    }
+  }
+
+  return parents
+}
+
+/**
+ * Inserts a flowchart node at the same logical level as `siblingNodeId`.
+ * Mermaid flowcharts do not encode indentation-based levels, so a sibling is
+ * represented by copying every safely parsed incoming edge of the anchor.
+ * Nodes without an incoming edge become an independent node.
+ */
+export function insertFlowchartSiblingNode(
+  source: string,
+  shape: FlowchartNodeShape,
+  label: string,
+  siblingNodeId: string,
+): { source: string; nodeId: string } | null {
+  if (
+    !isFlowchartSource(source) ||
+    !isEditableFlowchartNodeId(siblingNodeId) ||
+    getFlowchartNodeLabel(source, siblingNodeId) === null
+  ) {
+    return null
+  }
+
+  const parents = getFlowchartParentNodeIds(source, siblingNodeId)
+  const inserted = insertFlowchartNode(source, shape, label)
+  if (!inserted) return null
+
+  let nextSource = inserted.source
+  for (const parentNodeId of parents) {
+    nextSource = insertFlowchartEdge(nextSource, parentNodeId, inserted.nodeId) ?? nextSource
+  }
+
+  return { ...inserted, source: nextSource }
+}
+
 export function deleteFlowchartNode(source: string, nodeId: string): string | null {
   if (!isFlowchartSource(source) || !isEditableFlowchartNodeId(nodeId)) return null
   if (getFlowchartNodeLabel(source, nodeId) === null) return null
@@ -660,6 +725,10 @@ function findFlowchartEdgeMatches(
   source: string,
   tokens: FlowchartNodeToken[],
 ): ParsedFlowchartEdge[] {
+  const edgePart = String.raw`(?:[ox]?[-.=~]{2,}[>ox]?)`
+  const edgeOperatorPattern = new RegExp(
+    `^(?:${edgePart})(?:\\s+[^\\r\\n]*?\\s+${edgePart})?(?:\\s*\\|[^|\\r\\n]*\\|)?$`,
+  )
   const edges: ParsedFlowchartEdge[] = []
   for (let index = 0; index < tokens.length - 1; index += 1) {
     const from = tokens[index]
@@ -668,7 +737,7 @@ function findFlowchartEdgeMatches(
     const leading = between.match(/^\s*/)?.[0].length ?? 0
     const trailing = between.match(/\s*$/)?.[0].length ?? 0
     const operator = between.slice(leading, between.length - trailing)
-    if (!/^(?:[ox]?[-.=~]{2,}[>ox]?)(?:\s*\|[^|\r\n]*\|)?$/.test(operator)) continue
+    if (!edgeOperatorPattern.test(operator)) continue
 
     edges.push({
       from,
@@ -926,10 +995,14 @@ function encodeLabel(source: string): string {
     .replace(/\n/g, '<br/>')
 }
 
-function createNodeId(source: string): string {
+export function getNextFlowchartNodeId(source: string): string {
   let index = 1
   while (source.includes(`newNode${index}`)) index += 1
   return `newNode${index}`
+}
+
+function createNodeId(source: string): string {
+  return getNextFlowchartNodeId(source)
 }
 
 function createNodeDeclaration(nodeId: string, shape: FlowchartNodeShape, label: string): string {
