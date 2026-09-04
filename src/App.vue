@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { BookOpen, FolderGit2, ShieldCheck, Workflow } from '@lucide/vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { BookOpen, FolderGit2, Redo2, ShieldCheck, Undo2, Workflow } from '@lucide/vue'
 import MermaidEditor from './components/MermaidEditor.vue'
 import MermaidPreview from './components/MermaidPreview.vue'
 import MermaidThumbnailList from './components/MermaidThumbnailList.vue'
@@ -10,7 +10,7 @@ import {
   renderMermaidDiagram,
   useMermaidRenderer,
 } from './composables/useMermaidRenderer'
-import type { ExportBackground, MermaidTheme, PngScale } from './types/diagram'
+import type { ExportBackground, MermaidTheme, PngPadding, PngScale } from './types/diagram'
 import {
   createBatchEntryName,
   createPngBlob,
@@ -20,6 +20,24 @@ import {
   resolveBackgroundColor,
 } from './utils/exportDiagram'
 import { extractMermaidBlocks } from './utils/extractMermaidBlocks'
+import {
+  deleteFlowchartEdge,
+  deleteFlowchartNode,
+  insertFlowchartEdge,
+  insertFlowchartNode,
+  replaceMermaidBlockCode,
+  updateFlowchartNodeLabel,
+  type FlowchartNodeShape,
+} from './utils/editFlowchartNode'
+import {
+  deleteMindmapNode,
+  insertMindmapNode,
+  insertMindmapSibling,
+  isMindmapSource,
+  moveMindmapNode as moveMindmapNodeSource,
+  updateMindmapNodeLabel,
+  type MindmapNodeShape,
+} from './utils/editMindmapNode'
 import type { DiagramLayout } from './utils/applyDiagramLayout'
 
 const CODE_STORAGE_KEY = 'mermaid-image-studio:code'
@@ -34,6 +52,7 @@ const theme = ref<MermaidTheme>(storedSettings.theme)
 const layout = ref<DiagramLayout>(storedSettings.layout)
 const background = ref<ExportBackground>(storedSettings.background)
 const pngScale = ref<PngScale>(storedSettings.pngScale)
+const pngPadding = ref<PngPadding>(storedSettings.pngPadding)
 const editorCollapsed = ref(false)
 const draftSaved = ref(isLocalStorageAvailable())
 const isExporting = ref(false)
@@ -41,6 +60,7 @@ const exportingType = ref<'png' | 'svg' | 'zip' | ''>('')
 const activeDiagramIndex = ref(0)
 const batchProgress = ref({ current: 0, total: 0 })
 const toast = ref<{ message: string; type: 'success' | 'error' } | null>(null)
+const mermaidEditor = ref<InstanceType<typeof MermaidEditor> | null>(null)
 
 const diagrams = computed(() => extractMermaidBlocks(code.value))
 const activeDiagram = computed(() => diagrams.value[activeDiagramIndex.value] ?? null)
@@ -67,6 +87,8 @@ const batchProgressLabel = computed(() => {
   if (exportingType.value !== 'zip' || batchProgress.value.total === 0) return ''
   return `${batchProgress.value.current}/${batchProgress.value.total}`
 })
+const canUndo = computed(() => Boolean(mermaidEditor.value?.canUndo))
+const canRedo = computed(() => Boolean(mermaidEditor.value?.canRedo))
 
 let toastTimer: number | undefined
 
@@ -86,7 +108,7 @@ watch(
   },
 )
 
-watch([theme, layout, background, pngScale], () => {
+watch([theme, layout, background, pngScale, pngPadding], () => {
   try {
     localStorage.setItem(
       SETTINGS_STORAGE_KEY,
@@ -95,6 +117,7 @@ watch([theme, layout, background, pngScale], () => {
         layout: layout.value,
         background: background.value,
         pngScale: pngScale.value,
+        pngPadding: pngPadding.value,
       }),
     )
   } catch {
@@ -112,6 +135,41 @@ function clearCode() {
   showToast('编辑区已清空', 'success')
 }
 
+function undoCode(): boolean {
+  if (!mermaidEditor.value?.canUndo) return false
+  mermaidEditor.value.undo()
+  showToast('已撤回上一步操作', 'success')
+  return true
+}
+
+function redoCode(): boolean {
+  if (!mermaidEditor.value?.canRedo) return false
+  mermaidEditor.value.redo()
+  showToast('已恢复上一步操作', 'success')
+  return true
+}
+
+function handleGlobalHistoryShortcut(event: KeyboardEvent) {
+  if (!(event.metaKey || event.ctrlKey) || event.altKey) return
+  const target = event.target
+  if (
+    target instanceof HTMLElement &&
+    (target.isContentEditable || target.closest('textarea, input, select, [contenteditable="true"]'))
+  ) {
+    return
+  }
+
+  const key = event.key.toLowerCase()
+  const handled = key === 'z'
+    ? event.shiftKey
+      ? redoCode()
+      : undoCode()
+    : key === 'y'
+      ? redoCode()
+      : false
+  if (handled) event.preventDefault()
+}
+
 async function exportAsPng() {
   if (!svgMarkup.value || displayedErrorMessage.value) return
 
@@ -122,6 +180,7 @@ async function exportAsPng() {
       svgMarkup.value,
       pngScale.value,
       backgroundColor.value,
+      pngPadding.value,
     )
     showToast(`PNG 已导出：${size.width} × ${size.height} px`, 'success')
   } catch (error) {
@@ -161,6 +220,7 @@ async function exportAllAsZip() {
   const selectedLayout = layout.value
   const selectedScale = pngScale.value
   const selectedBackground = backgroundColor.value
+  const selectedPadding = pngPadding.value
   const failures: Array<{ index: number; title: string | null; message: string }> = []
   let successCount = 0
   let totalPngBytes = 0
@@ -178,7 +238,12 @@ async function exportAllAsZip() {
 
       try {
         const rendered = await renderMermaidDiagram(diagram.code, selectedTheme, selectedLayout)
-        const { blob } = await createPngBlob(rendered.svg, selectedScale, selectedBackground)
+        const { blob } = await createPngBlob(
+          rendered.svg,
+          selectedScale,
+          selectedBackground,
+          selectedPadding,
+        )
         if (totalPngBytes + blob.size > MAX_BATCH_PNG_BYTES) {
           batchLimitError = '批量 PNG 总大小超过 200 MB，请降低清晰度或分批导出。'
           for (let skippedIndex = index; skippedIndex < batch.length; skippedIndex += 1) {
@@ -235,6 +300,200 @@ async function exportAllAsZip() {
   }
 }
 
+function editNodeLabel(nodeId: string, nextLabel: string) {
+  const diagram = activeDiagram.value
+  if (!diagram) return
+
+  const mindmap = isMindmapSource(diagram.code)
+  const nodeIndex = mindmap ? getMindmapNodeIndex(nodeId) : null
+  const nextDiagramCode = mindmap
+    ? nodeIndex === null
+      ? null
+      : updateMindmapNodeLabel(diagram.code, nodeIndex, nextLabel)
+    : updateFlowchartNodeLabel(diagram.code, nodeId, nextLabel)
+  if (nextDiagramCode === null) {
+    showToast(
+      mindmap
+        ? '暂时无法定位这个脑图节点，请在左侧源码中编辑。'
+        : '暂时无法定位这个节点，请在左侧源码中编辑。',
+      'error',
+    )
+    return
+  }
+
+  const nextDocument = replaceMermaidBlockCode(code.value, diagram, nextDiagramCode)
+  if (nextDocument === null) {
+    showToast('源码已经变化，请重新双击节点后再试。', 'error')
+    return
+  }
+
+  code.value = nextDocument
+  showToast(mindmap ? '脑图节点文字已更新，可在左侧撤销。' : '节点文字已更新，可在左侧撤销。', 'success')
+}
+
+function insertNode(
+  shape: FlowchartNodeShape,
+  label: string,
+  afterNodeId: string | null,
+  relation: 'child' | 'sibling' = 'child',
+) {
+  const diagram = activeDiagram.value
+  if (!diagram) return
+
+  const mindmap = isMindmapSource(diagram.code)
+  const parentIndex = afterNodeId ? getMindmapNodeIndex(afterNodeId) : null
+  const mindmapShape: MindmapNodeShape = shape === 'diamond' ? 'hexagon' : shape
+  const inserted = mindmap
+    ? parentIndex === null
+      ? null
+      : relation === 'sibling'
+        ? insertMindmapSibling(diagram.code, parentIndex, label, mindmapShape)
+        : insertMindmapNode(diagram.code, mindmapShape, label, parentIndex)
+    : insertFlowchartNode(diagram.code, shape, label, afterNodeId)
+  if (!inserted) {
+    showToast(
+      mindmap
+        ? '暂时无法在这里插入脑图子节点，请选择有效节点后重试。'
+        : '暂时无法在这里插入节点，请在左侧源码中编辑。',
+      'error',
+    )
+    return
+  }
+
+  const nextDocument = replaceMermaidBlockCode(code.value, diagram, inserted.source)
+  if (nextDocument === null) {
+    showToast('源码已经变化，请重新打开右键菜单后再试。', 'error')
+    return
+  }
+
+  code.value = nextDocument
+  showToast(
+    mindmap
+      ? relation === 'sibling'
+        ? '已插入脑图同级节点，可在左侧撤销。'
+        : '已插入脑图子节点，可在左侧撤销。'
+      : afterNodeId
+        ? '已插入并连接新节点。'
+        : '已插入独立节点。',
+    'success',
+  )
+}
+
+function deleteNode(nodeId: string) {
+  const diagram = activeDiagram.value
+  if (!diagram) return
+
+  const mindmap = isMindmapSource(diagram.code)
+  const nodeIndex = mindmap ? getMindmapNodeIndex(nodeId) : null
+  const nextDiagramCode = mindmap
+    ? nodeIndex === null
+      ? null
+      : deleteMindmapNode(diagram.code, nodeIndex)
+    : deleteFlowchartNode(diagram.code, nodeId)
+  if (nextDiagramCode === null) {
+    const deleteFailureMessage = mindmap
+      ? nodeIndex === 0
+        ? '脑图根节点不能删除；如需重建请在左侧源码中编辑。'
+        : '暂时无法安全删除这个脑图节点，请在左侧源码中编辑。'
+      : '暂时无法安全删除这个节点，请在左侧源码中编辑。'
+    showToast(
+      deleteFailureMessage,
+      'error',
+    )
+    return
+  }
+
+  const nextDocument = replaceMermaidBlockCode(code.value, diagram, nextDiagramCode)
+  if (nextDocument === null) {
+    showToast('源码已经变化，请重新打开右键菜单后再试。', 'error')
+    return
+  }
+
+  code.value = nextDocument
+  showToast(
+    mindmap
+      ? '脑图节点及其子树已删除，可在左侧撤销。'
+      : '节点及相关连线已删除，可在左侧撤销。',
+    'success',
+  )
+}
+
+function deleteEdge(fromNodeId: string, toNodeId: string, occurrence = 0) {
+  const diagram = activeDiagram.value
+  if (!diagram) return
+
+  const nextDiagramCode = deleteFlowchartEdge(
+    diagram.code,
+    fromNodeId,
+    toNodeId,
+    occurrence,
+  )
+  if (nextDiagramCode === null) {
+    showToast('暂时无法安全删除这条连线，请在左侧源码中编辑。', 'error')
+    return
+  }
+
+  const nextDocument = replaceMermaidBlockCode(code.value, diagram, nextDiagramCode)
+  if (nextDocument === null) {
+    showToast('源码已经变化，请重新打开连线菜单后再试。', 'error')
+    return
+  }
+
+  code.value = nextDocument
+  showToast('连线已删除，可在左侧撤销。', 'success')
+}
+
+function moveNode(nodeId: string, newParentNodeId: string) {
+  const diagram = activeDiagram.value
+  if (!diagram || !isMindmapSource(diagram.code)) return
+
+  const nodeIndex = getMindmapNodeIndex(nodeId)
+  const newParentIndex = getMindmapNodeIndex(newParentNodeId)
+  const nextDiagramCode =
+    nodeIndex === null || newParentIndex === null
+      ? null
+      : moveMindmapNodeSource(diagram.code, nodeIndex, newParentIndex)
+  if (nextDiagramCode === null) {
+    showToast('暂时无法移动这个节点，请重新选择目标父节点。', 'error')
+    return
+  }
+
+  const nextDocument = replaceMermaidBlockCode(code.value, diagram, nextDiagramCode)
+  if (nextDocument === null) {
+    showToast('源码已经变化，请重新打开节点菜单后再试。', 'error')
+    return
+  }
+
+  code.value = nextDocument
+  showToast('节点及其子树已移动，可在左侧撤销。', 'success')
+}
+
+function connectNodes(fromNodeId: string, toNodeId: string) {
+  const diagram = activeDiagram.value
+  if (!diagram) return
+
+  const nextDiagramCode = insertFlowchartEdge(diagram.code, fromNodeId, toNodeId)
+  if (nextDiagramCode === null) {
+    showToast(
+      '无法建立连线：请检查节点是否有效，且不能自连接或重复连线；已有路径和回路允许建立。',
+      'error',
+    )
+    return
+  }
+
+  const nextDocument = replaceMermaidBlockCode(code.value, diagram, nextDiagramCode)
+  if (nextDocument === null) {
+    showToast('源码已经变化，请重新拖拽连线。', 'error')
+    return
+  }
+
+  code.value = nextDocument
+  showToast(
+    `连线已建立：${fromNodeId} → ${toNodeId}（箭头指向 ${toNodeId}）；如需回退可右键删除或左侧撤销。`,
+    'success',
+  )
+}
+
 function showToast(message: string, type: 'success' | 'error') {
   window.clearTimeout(toastTimer)
   toast.value = { message, type }
@@ -245,6 +504,11 @@ function showToast(message: string, type: 'success' | 'error') {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '导出失败，请稍后重试。'
+}
+
+function getMindmapNodeIndex(nodeId: string): number | null {
+  const match = nodeId.match(/^node_(\d+)$/)
+  return match ? Number(match[1]) : null
 }
 
 function readStoredCode(): string {
@@ -271,12 +535,14 @@ function readStoredSettings(): {
   layout: DiagramLayout
   background: ExportBackground
   pngScale: PngScale
+  pngPadding: PngPadding
 } {
   const fallback = {
     theme: 'default' as const,
     layout: 'source' as const,
     background: 'theme' as const,
     pngScale: 3 as const,
+    pngPadding: 32 as const,
   }
 
   try {
@@ -287,6 +553,7 @@ function readStoredSettings(): {
     const validBackgrounds: ExportBackground[] = ['theme', 'white', 'transparent']
     const validLayouts: DiagramLayout[] = ['source', 'horizontal', 'vertical']
     const validScales: PngScale[] = [1, 2, 3, 4]
+    const validPaddings: PngPadding[] = [0, 16, 32, 48, 64]
 
     return {
       theme: isMermaidTheme(value.theme) ? value.theme : fallback.theme,
@@ -299,13 +566,21 @@ function readStoredSettings(): {
       pngScale: validScales.includes(value.pngScale as PngScale)
         ? (value.pngScale as PngScale)
         : fallback.pngScale,
+      pngPadding: validPaddings.includes(value.pngPadding as PngPadding)
+        ? (value.pngPadding as PngPadding)
+        : fallback.pngPadding,
     }
   } catch {
     return fallback
   }
 }
 
-onBeforeUnmount(() => window.clearTimeout(toastTimer))
+onMounted(() => window.addEventListener('keydown', handleGlobalHistoryShortcut))
+
+onBeforeUnmount(() => {
+  window.clearTimeout(toastTimer)
+  window.removeEventListener('keydown', handleGlobalHistoryShortcut)
+})
 </script>
 
 <template>
@@ -320,6 +595,30 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer))
       </div>
 
       <div class="header-actions">
+        <div class="header-history" aria-label="编辑历史">
+          <button
+            class="history-control"
+            type="button"
+            :disabled="!canUndo"
+            aria-label="撤回上一步操作"
+            title="撤回（Cmd/Ctrl+Z）"
+            @click="undoCode"
+          >
+            <Undo2 :size="15" aria-hidden="true" />
+            <span>撤回</span>
+          </button>
+          <button
+            class="history-control"
+            type="button"
+            :disabled="!canRedo"
+            aria-label="恢复上一步操作"
+            title="恢复（Cmd/Ctrl+Shift+Z）"
+            @click="redoCode"
+          >
+            <Redo2 :size="15" aria-hidden="true" />
+            <span>恢复</span>
+          </button>
+        </div>
         <span class="privacy-badge" title="代码不会发送到任何服务器">
           <ShieldCheck :size="15" />
           纯本地运行 · 数据不上传
@@ -358,6 +657,7 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer))
         }"
       >
         <MermaidEditor
+          ref="mermaidEditor"
           v-model="code"
           v-model:collapsed="editorCollapsed"
           :examples="diagramExamples"
@@ -385,7 +685,9 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer))
           v-model:layout="layout"
           v-model:background="background"
           v-model:png-scale="pngScale"
+          v-model:png-padding="pngPadding"
           :svg-markup="svgMarkup"
+          :active-diagram-code="activeDiagramCode"
           :error-message="displayedErrorMessage"
           :is-rendering="isRendering"
           :is-exporting="isExporting"
@@ -397,6 +699,12 @@ onBeforeUnmount(() => window.clearTimeout(toastTimer))
           @export-svg="exportAsSvg"
           @export-png="exportAsPng"
           @export-zip="exportAllAsZip"
+          @edit-node-label="editNodeLabel"
+          @insert-node="insertNode"
+          @delete-node="deleteNode"
+          @delete-edge="deleteEdge"
+          @connect-nodes="connectNodes"
+          @move-node="moveNode"
         />
       </div>
     </main>

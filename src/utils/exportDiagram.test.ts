@@ -19,8 +19,18 @@ describe('calculateCanvasSize', () => {
     })
   })
 
+  it('将四周留白计入最终尺寸并随倍率缩放', () => {
+    expect(calculateCanvasSize({ width: 320.2, height: 180.1 }, 3, 32)).toEqual({
+      width: 1153,
+      height: 733,
+    })
+  })
+
   it('拒绝超过浏览器安全边界的尺寸', () => {
     expect(() => calculateCanvasSize({ width: 5_000, height: 2_000 }, 4)).toThrow(
+      '超过浏览器限制',
+    )
+    expect(() => calculateCanvasSize({ width: 16_300, height: 100 }, 1, 64)).toThrow(
       '超过浏览器限制',
     )
   })

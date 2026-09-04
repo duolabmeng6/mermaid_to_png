@@ -43,6 +43,8 @@ export type ExportBackground = 'theme' | 'white' | 'transparent'
 
 export type PngScale = 1 | 2 | 3 | 4
 
+export type PngPadding = 0 | 16 | 32 | 48 | 64
+
 export interface DiagramDimensions {
   x: number
   y: number

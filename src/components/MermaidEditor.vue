@@ -7,8 +7,10 @@ import {
   ChevronRight,
   Code2,
   LoaderCircle,
+  Redo2,
   RotateCcw,
   Trash2,
+  Undo2,
 } from '@lucide/vue'
 import type { DiagramExample } from '../types/diagram'
 
@@ -40,8 +42,8 @@ interface EditorSnapshot {
 
 const textarea = ref<HTMLTextAreaElement | null>(null)
 const gutter = ref<HTMLElement | null>(null)
-const historyPast: EditorSnapshot[] = []
-const historyFuture: EditorSnapshot[] = []
+const historyPast = ref<EditorSnapshot[]>([])
+const historyFuture = ref<EditorSnapshot[]>([])
 const HISTORY_LIMIT = 100
 const HISTORY_CHARACTER_LIMIT = 2_000_000
 let currentEditorValue = props.modelValue
@@ -52,6 +54,15 @@ const editorValue = computed({
   set: commitEditorValue,
 })
 const isCollapsed = computed(() => props.collapsed)
+const canUndo = computed(() => historyPast.value.length > 0)
+const canRedo = computed(() => historyFuture.value.length > 0)
+
+defineExpose({
+  canUndo,
+  canRedo,
+  undo: undoEdit,
+  redo: redoEdit,
+})
 
 const lineCount = computed(() => Math.max(1, props.modelValue.split('\n').length))
 const lineNumbers = computed(() => Array.from({ length: lineCount.value }, (_, index) => index + 1))
@@ -106,9 +117,9 @@ function captureBeforeInputState(event: Event) {
 
 function commitEditorValue(value: string) {
   if (value === currentEditorValue) return
-  pushHistory(historyPast, pendingSnapshot ?? createSnapshot(currentEditorValue))
+  pushHistory(historyPast.value, pendingSnapshot ?? createSnapshot(currentEditorValue))
   pendingSnapshot = null
-  historyFuture.length = 0
+  historyFuture.value.length = 0
   currentEditorValue = value
   emit('update:modelValue', value)
 }
@@ -129,16 +140,16 @@ function applyHistoryValue(snapshot: EditorSnapshot) {
 }
 
 function undoEdit() {
-  const previousSnapshot = historyPast.pop()
+  const previousSnapshot = historyPast.value.pop()
   if (!previousSnapshot) return
-  pushHistory(historyFuture, createSnapshot(currentEditorValue))
+  pushHistory(historyFuture.value, createSnapshot(currentEditorValue))
   applyHistoryValue(previousSnapshot)
 }
 
 function redoEdit() {
-  const nextSnapshot = historyFuture.pop()
+  const nextSnapshot = historyFuture.value.pop()
   if (!nextSnapshot) return
-  pushHistory(historyPast, createSnapshot(currentEditorValue))
+  pushHistory(historyPast.value, createSnapshot(currentEditorValue))
   applyHistoryValue(nextSnapshot)
 }
 
@@ -176,8 +187,8 @@ watch(
   () => props.modelValue,
   (value) => {
     if (value === currentEditorValue) return
-    pushHistory(historyPast, createSnapshot(currentEditorValue))
-    historyFuture.length = 0
+    pushHistory(historyPast.value, createSnapshot(currentEditorValue))
+    historyFuture.value.length = 0
     pendingSnapshot = null
     currentEditorValue = value
   },
@@ -209,6 +220,27 @@ watch(
           />
           <span class="status-label">{{ status.label }}</span>
         </span>
+
+        <button
+          class="history-button"
+          type="button"
+          :disabled="!canUndo"
+          aria-label="撤销"
+          title="撤销（Cmd/Ctrl+Z）"
+          @click="undoEdit"
+        >
+          <Undo2 :size="16" aria-hidden="true" />
+        </button>
+        <button
+          class="history-button"
+          type="button"
+          :disabled="!canRedo"
+          aria-label="重做"
+          title="重做（Cmd/Ctrl+Shift+Z）"
+          @click="redoEdit"
+        >
+          <Redo2 :size="16" aria-hidden="true" />
+        </button>
 
         <button
           class="collapse-button"
@@ -322,6 +354,33 @@ watch(
   flex: 0 0 auto;
   min-width: 0;
   margin-left: auto;
+}
+
+.history-button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+
+.history-button:hover:not(:disabled),
+.history-button:focus-visible:not(:disabled) {
+  color: var(--primary-strong);
+  border-color: #bbb6f6;
+  background: #f8f7ff;
+}
+
+.history-button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
 }
 
 .collapse-button {

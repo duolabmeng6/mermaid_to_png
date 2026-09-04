@@ -1,4 +1,4 @@
-import type { DiagramDimensions, MermaidTheme, PngScale } from '../types/diagram'
+import type { DiagramDimensions, MermaidTheme, PngPadding, PngScale } from '../types/diagram'
 import { getThemePreset } from '../data/themePresets'
 
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
@@ -28,6 +28,7 @@ export function resolveBackgroundColor(
 export function calculateCanvasSize(
   dimensions: Pick<DiagramDimensions, 'width' | 'height'>,
   scale: PngScale,
+  padding: PngPadding = 0,
 ): CanvasSize {
   if (
     !Number.isFinite(dimensions.width) ||
@@ -38,8 +39,8 @@ export function calculateCanvasSize(
     throw new Error('图表尺寸无效，请重新渲染后再试。')
   }
 
-  const width = Math.ceil(dimensions.width * scale)
-  const height = Math.ceil(dimensions.height * scale)
+  const width = Math.ceil((dimensions.width + padding * 2) * scale)
+  const height = Math.ceil((dimensions.height + padding * 2) * scale)
 
   if (width > MAX_CANVAS_EDGE || height > MAX_CANVAS_EDGE) {
     throw new Error(`导出尺寸 ${width} × ${height} px 超过浏览器限制，请降低 PNG 倍率。`)
@@ -112,9 +113,10 @@ export async function createPngBlob(
   svgSource: string,
   scale: PngScale,
   backgroundColor: string,
+  padding: PngPadding = 0,
 ): Promise<{ blob: Blob; size: CanvasSize }> {
   const { source, dimensions } = normalizeSvg(svgSource, 'transparent')
-  const canvasSize = calculateCanvasSize(dimensions, scale)
+  const canvasSize = calculateCanvasSize(dimensions, scale, padding)
   const svgBlob = new Blob([source], { type: 'image/svg+xml;charset=utf-8' })
   const objectUrl = URL.createObjectURL(svgBlob)
 
@@ -134,7 +136,14 @@ export async function createPngBlob(
 
     context.imageSmoothingEnabled = true
     context.imageSmoothingQuality = 'high'
-    context.drawImage(image, 0, 0, canvas.width, canvas.height)
+    const scaledPadding = padding * scale
+    context.drawImage(
+      image,
+      scaledPadding,
+      scaledPadding,
+      dimensions.width * scale,
+      dimensions.height * scale,
+    )
 
     return {
       blob: await canvasToBlob(canvas),
@@ -154,8 +163,9 @@ export async function downloadPng(
   svgSource: string,
   scale: PngScale,
   backgroundColor: string,
+  padding: PngPadding = 0,
 ): Promise<CanvasSize> {
-  const { blob, size } = await createPngBlob(svgSource, scale, backgroundColor)
+  const { blob, size } = await createPngBlob(svgSource, scale, backgroundColor, padding)
   saveBlob(blob, createDownloadName('png'))
   return size
 }

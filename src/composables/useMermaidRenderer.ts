@@ -135,8 +135,6 @@ async function renderDiagram(
   })
 
   if ('fonts' in document) await document.fonts.ready
-  await mermaid.parse(source)
-
   const id = `mermaid-diagram-${Date.now()}-${++renderSequence}`
   const { svg } = await mermaid.render(id, source)
   return {

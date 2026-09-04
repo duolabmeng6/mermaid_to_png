@@ -3,7 +3,7 @@ import { extractMermaidBlocks } from './extractMermaidBlocks'
 
 describe('extractMermaidBlocks', () => {
   it('将纯 Mermaid 源码回退为单张图', () => {
-    expect(extractMermaidBlocks('\nflowchart LR\n  A --> B\n')).toEqual([
+    expect(extractMermaidBlocks('\nflowchart LR\n  A --> B\n')).toMatchObject([
       {
         title: null,
         code: 'flowchart LR\n  A --> B',
@@ -28,7 +28,7 @@ describe('extractMermaidBlocks', () => {
       '~~~',
     ].join('\n')
 
-    expect(extractMermaidBlocks(source)).toEqual([
+    expect(extractMermaidBlocks(source)).toMatchObject([
       {
         title: '总览',
         code: 'flowchart LR\n  A --> B',
@@ -45,7 +45,7 @@ describe('extractMermaidBlocks', () => {
   it('没有标题时保留空标题，并忽略空 Mermaid 块', () => {
     const source = ['```mermaid', '   ', '```', '```mermaid', 'graph TD', '```'].join('\n')
 
-    expect(extractMermaidBlocks(source)).toEqual([
+    expect(extractMermaidBlocks(source)).toMatchObject([
       { title: null, code: 'graph TD', startLine: 5 },
     ])
   })
@@ -65,7 +65,7 @@ describe('extractMermaidBlocks', () => {
   it('围栏类型和长度必须匹配才会闭合', () => {
     const source = ['````mermaid', 'graph TD', '```', '~~~', '````'].join('\n')
 
-    expect(extractMermaidBlocks(source)).toEqual([
+    expect(extractMermaidBlocks(source)).toMatchObject([
       { title: null, code: 'graph TD\n```\n~~~', startLine: 2 },
     ])
   })
@@ -81,5 +81,13 @@ describe('extractMermaidBlocks', () => {
     ].join('\n')
 
     expect(extractMermaidBlocks(source)[0]?.title).toBeNull()
+  })
+
+  it('记录 Mermaid 代码在 CRLF 原文中的精确字符范围', () => {
+    const source = '# 第一张\r\n```mermaid\r\n\r\nflowchart LR\r\n  A --> B\r\n\r\n```\r\n'
+    const block = extractMermaidBlocks(source)[0]
+
+    expect(block.code).toBe('flowchart LR\n  A --> B')
+    expect(source.slice(block.startOffset, block.endOffset)).toBe('flowchart LR\r\n  A --> B')
   })
 })

@@ -6,6 +6,7 @@ import type { DiagramLayout } from '../utils/applyDiagramLayout'
 import type { MermaidBlock } from '../utils/extractMermaidBlocks'
 
 interface ThumbnailState {
+  key: string
   svg: string
   status: 'loading' | 'ready' | 'error'
 }
@@ -32,10 +33,33 @@ let isInitialRender = true
 watch(
   [() => props.diagrams, () => props.theme, () => props.layout],
   ([diagrams, theme, layout]) => {
+    const keys = diagrams.map((diagram) => `${theme}\0${layout}\0${diagram.code}`)
+    const previous = thumbnails.value
+    const hasChanges =
+      keys.length !== previous.length || keys.some((key, index) => previous[index]?.key !== key)
+    if (!hasChanges) return
+
     const currentRevision = ++revision
     window.clearTimeout(debounceTimer)
-    thumbnails.value = diagrams.map(() => ({ svg: '', status: 'loading' }))
-    const run = () => void renderThumbnails([...diagrams], theme, layout, currentRevision)
+    const readyCache = new Map(
+      previous
+        .filter((thumbnail) => thumbnail.status === 'ready')
+        .map((thumbnail) => [thumbnail.key, thumbnail] as const),
+    )
+    const pendingIndexes: number[] = []
+    thumbnails.value = keys.map((key, index) => {
+      const previousAtIndex = previous[index]
+      if (previousAtIndex?.key === key) {
+        if (previousAtIndex.status === 'loading') pendingIndexes.push(index)
+        return previousAtIndex
+      }
+      const cached = readyCache.get(key)
+      if (cached) return cached
+      pendingIndexes.push(index)
+      return { key, svg: '', status: 'loading' }
+    })
+    const run = () =>
+      void renderThumbnails([...diagrams], theme, layout, currentRevision, pendingIndexes)
 
     if (isInitialRender) {
       isInitialRender = false
@@ -57,16 +81,25 @@ async function renderThumbnails(
   theme: MermaidTheme,
   layout: DiagramLayout,
   currentRevision: number,
+  indexes: number[],
 ) {
-  for (let index = 0; index < diagrams.length; index += 1) {
-    try {
-      const rendered = await renderMermaidDiagram(diagrams[index].code, theme, layout)
-      if (currentRevision !== revision) return
-      thumbnails.value[index] = { svg: rendered.svg, status: 'ready' }
-    } catch {
-      if (currentRevision !== revision) return
-      thumbnails.value[index] = { svg: '', status: 'error' }
+  const renderedByKey = new Map<string, string | null>()
+  for (const index of indexes) {
+    const key = `${theme}\0${layout}\0${diagrams[index].code}`
+    if (!renderedByKey.has(key)) {
+      try {
+        const rendered = await renderMermaidDiagram(diagrams[index].code, theme, layout)
+        renderedByKey.set(key, rendered.svg)
+      } catch {
+        renderedByKey.set(key, null)
+      }
     }
+    if (currentRevision !== revision) return
+
+    const svg = renderedByKey.get(key)
+    thumbnails.value[index] = svg
+      ? { key, svg, status: 'ready' }
+      : { key, svg: '', status: 'error' }
   }
 }
 
@@ -99,7 +132,7 @@ function diagramLabel(diagram: MermaidBlock, index: number): string {
             :style="backgroundColor === 'transparent' ? undefined : { backgroundColor }"
           >
             <span
-              v-if="thumbnails[index]?.status === 'ready'"
+              v-if="thumbnails[index]?.svg"
               class="thumbnail-svg"
               aria-hidden="true"
               v-html="thumbnails[index].svg"
