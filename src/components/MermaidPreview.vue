@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   AlertTriangle,
+  ArrowDownUp,
   FileCode2,
   FileArchive,
   FileDown,
@@ -72,6 +73,17 @@ interface EdgeDragState {
   startClientY: number
   clientX: number
   clientY: number
+  active: boolean
+  targetNodeId: string | null
+  targetNode: SVGGElement | null
+}
+
+interface SortDragState {
+  pointerId: number
+  sourceNodeId: string
+  sourceNode: SVGGElement
+  startClientX: number
+  startClientY: number
   active: boolean
   targetNodeId: string | null
   targetNode: SVGGElement | null
@@ -158,6 +170,7 @@ const emit = defineEmits<{
   deleteNodes: [nodeIds: string[]]
   deleteEdge: [fromNodeId: string, toNodeId: string, occurrence: number]
   connectNodes: [fromNodeId: string, toNodeId: string]
+  reorderNode: [nodeId: string, targetNodeId: string]
   moveNode: [nodeId: string, newParentNodeId: string]
 }>()
 
@@ -184,7 +197,9 @@ const contextMenuElement = ref<HTMLElement | null>(null)
 const contextMenu = ref<DiagramContextMenu | null>(null)
 const selectedNodeIds = ref<Set<string>>(new Set())
 const edgeDrag = ref<EdgeDragState | null>(null)
+const sortDrag = ref<SortDragState | null>(null)
 const connectionMode = ref(false)
+const sortMode = ref(false)
 const nodeEditorPending = ref(false)
 const inlineNodeEditorPending = ref(false)
 const previewZoom = ref<PreviewZoom>(1)
@@ -207,9 +222,12 @@ let contextMenuInvoker: HTMLElement | SVGElement | null = null
 let contextMenuRevision = 0
 let previewScrollPosition = { left: 0, top: 0 }
 let edgeDropTarget: SVGGElement | null = null
+let sortDropTarget: SVGGElement | null = null
+let suppressNextSortClick = false
 let preparedDiagramCode = ''
 let pendingNodeFocusId: string | null = null
 let pendingNodeFocusFallbackId: string | null = null
+let pendingInlineEditNodeId: string | null = null
 let inlineEditorBlurTimer: number | undefined
 const themeGroups = (Object.keys(themeGroupLabels) as Array<keyof typeof themeGroupLabels>).map(
   (group) => ({
@@ -260,6 +278,9 @@ const canExport = computed(
 )
 const canExportAll = computed(() => props.diagramCount > 1 && !props.isExporting)
 const canUseConnectionMode = computed(
+  () => Boolean(props.svgMarkup) && !props.isRendering && !props.errorMessage && isFlowchartSource(props.activeDiagramCode),
+)
+const canUseSortMode = computed(
   () => Boolean(props.svgMarkup) && !props.isRendering && !props.errorMessage && isFlowchartSource(props.activeDiagramCode),
 )
 
@@ -529,12 +550,28 @@ function handlePreviewPointerDown(event: PointerEvent) {
     return
   }
 
+  if (
+    sortMode.value &&
+    stage &&
+    props.svgMarkup &&
+    isDiagramInteractionCurrent() &&
+    event.pointerType === 'mouse' &&
+    event.button === 0 &&
+    event.isPrimary &&
+    node &&
+    !isInteractiveTarget
+  ) {
+    startSortDrag(event, node)
+    return
+  }
+
   // SVG <g> elements are not consistently focused by a mouse click in every
   // browser. Focus the editable node explicitly so the next Tab/Enter key is
   // handled by the mindmap keyboard actions instead of leaving the page.
   if (
     node &&
     !connectionMode.value &&
+    !sortMode.value &&
     event.isPrimary &&
     event.button === 0 &&
     !isInteractiveTarget
@@ -573,6 +610,11 @@ function handlePreviewPointerDown(event: PointerEvent) {
 
 function handlePreviewClick(event: MouseEvent) {
   if (connectionMode.value || !(event.target instanceof Element)) return
+  if (suppressNextSortClick) {
+    suppressNextSortClick = false
+    event.preventDefault()
+    return
+  }
   const node = getEditableNode(event.target)
   if (event.button !== 0 || event.defaultPrevented) return
   if (event.target.closest('a, button, input, select, textarea')) return
@@ -595,7 +637,23 @@ function handlePreviewClick(event: MouseEvent) {
 function toggleConnectionMode() {
   if (!canUseConnectionMode.value) return
   connectionMode.value = !connectionMode.value
-  if (!connectionMode.value) cancelEdgeDrag()
+  if (connectionMode.value) {
+    sortMode.value = false
+    cancelSortDrag()
+  } else {
+    cancelEdgeDrag()
+  }
+}
+
+function toggleSortMode() {
+  if (!canUseSortMode.value) return
+  sortMode.value = !sortMode.value
+  if (sortMode.value) {
+    connectionMode.value = false
+    cancelEdgeDrag()
+  } else {
+    cancelSortDrag()
+  }
 }
 
 function getEditableNode(target: EventTarget | null): SVGGElement | null {
@@ -728,18 +786,99 @@ function finishEdgeDrag(event: PointerEvent) {
   cancelEdgeDrag(event)
 }
 
+function startSortDrag(event: PointerEvent, sourceNode: SVGGElement) {
+  const stage = previewStage.value
+  const sourceNodeId = sourceNode.dataset.id
+  if (!stage || !sourceNodeId) return
+
+  cancelSortDrag()
+  sortDrag.value = {
+    pointerId: event.pointerId,
+    sourceNodeId,
+    sourceNode,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    active: false,
+    targetNodeId: null,
+    targetNode: null,
+  }
+  stage.setPointerCapture(event.pointerId)
+  sourceNode.focus({ preventScroll: true })
+}
+
+function updateSortDrag(event: PointerEvent): boolean {
+  const drag = sortDrag.value
+  const stage = previewStage.value
+  if (!drag || !stage || event.pointerId !== drag.pointerId) return false
+
+  const distance = Math.hypot(
+    event.clientX - drag.startClientX,
+    event.clientY - drag.startClientY,
+  )
+  if (!drag.active && distance < 5) return true
+
+  if (!drag.active) drag.active = true
+
+  const hovered = document.elementFromPoint(event.clientX, event.clientY)
+  const hoveredNode = getEditableNode(hovered)
+  const targetNode = hoveredNode?.dataset.id === drag.sourceNodeId ? null : hoveredNode
+  updateSortDropTarget(targetNode)
+  drag.targetNode = targetNode
+  drag.targetNodeId = targetNode?.dataset.id ?? null
+  event.preventDefault()
+  return true
+}
+
+function updateSortDropTarget(nextTarget: SVGGElement | null) {
+  if (sortDropTarget === nextTarget) return
+  sortDropTarget?.classList.remove('is-sort-drop-target')
+  sortDropTarget = nextTarget
+  sortDropTarget?.classList.add('is-sort-drop-target')
+}
+
+function cancelSortDrag(event?: PointerEvent) {
+  const drag = sortDrag.value
+  if (!drag || (event && event.pointerId !== drag.pointerId)) return
+  const stage = previewStage.value
+  updateSortDropTarget(null)
+  sortDrag.value = null
+  if (stage?.hasPointerCapture(drag.pointerId)) stage.releasePointerCapture(drag.pointerId)
+}
+
+function finishSortDrag(event: PointerEvent) {
+  const drag = sortDrag.value
+  if (!drag || event.pointerId !== drag.pointerId) return
+  const shouldReorder = Boolean(
+    drag.active && drag.targetNodeId && drag.targetNodeId !== drag.sourceNodeId,
+  )
+  const sourceNodeId = drag.sourceNodeId
+  const targetNodeId = drag.targetNodeId
+  if (drag.active) {
+    event.preventDefault()
+    suppressNextSortClick = true
+    window.setTimeout(() => {
+      suppressNextSortClick = false
+    }, 0)
+  }
+  cancelSortDrag(event)
+  if (shouldReorder && targetNodeId) emit('reorderNode', sourceNodeId, targetNodeId)
+}
+
 function handlePreviewPointerUp(event: PointerEvent) {
   if (edgeDrag.value) finishEdgeDrag(event)
+  else if (sortDrag.value) finishSortDrag(event)
   else stopPreviewDrag(event)
 }
 
 function handlePreviewPointerCancel(event: PointerEvent) {
   if (edgeDrag.value) cancelEdgeDrag(event)
+  else if (sortDrag.value) cancelSortDrag(event)
   else stopPreviewDrag(event)
 }
 
 function handlePreviewLostPointerCapture(event: PointerEvent) {
   if (edgeDrag.value) cancelEdgeDrag(event)
+  else if (sortDrag.value) cancelSortDrag(event)
   else stopPreviewDrag(event)
 }
 
@@ -747,6 +886,7 @@ function openNodeEditor(node: SVGGElement) {
   if (
     !isDiagramInteractionCurrent() ||
     connectionMode.value ||
+    sortMode.value ||
     isDraggingPreview.value
   ) return
   const nodeId = node.dataset.id
@@ -862,7 +1002,7 @@ function openNodeInspector() {
 }
 
 function handlePreviewDoubleClick(event: MouseEvent) {
-  if (connectionMode.value) return
+  if (connectionMode.value || sortMode.value) return
   const node = getEditableNode(event.target)
   if (!node) return
   event.preventDefault()
@@ -1085,6 +1225,7 @@ function openInsertSiblingEditor(anchorNodeId = contextMenu.value?.nodeId) {
 function createKeyboardNode(
   nodeId: string,
   relation: 'child' | 'sibling',
+  editAfterCreate = false,
 ) {
   if (!isDiagramInteractionCurrent() || connectionMode.value) return
 
@@ -1103,6 +1244,7 @@ function createKeyboardNode(
     return
   }
 
+  pendingInlineEditNodeId = editAfterCreate ? nextNodeId : null
   setPendingNodeFocus(nextNodeId, nodeId)
   emit('insertNode', 'rectangle', '新节点', nodeId, relation)
 }
@@ -1248,6 +1390,7 @@ function dismissContextMenu() {
 function dismissPreviewTransientState() {
   dismissContextMenu()
   cancelEdgeDrag()
+  cancelSortDrag()
   closeDeleteConfirmation()
   closeMoveNodeDialog()
 }
@@ -1280,12 +1423,13 @@ function prepareEditableNodes() {
     node.setAttribute('role', 'button')
     const keyboardHint = mindmap
       ? nodeId === 'node_0'
-        ? '按 Enter 或 Tab 新建子节点，双击编辑文字'
-        : '按 Enter 新建同级、按 Tab 新建子节点，双击编辑文字'
-      : '按 Enter 新建同级、按 Tab 新建下级，双击编辑文字'
+        ? '按 Enter 或 Tab 新建子节点并编辑'
+        : '按 Enter 新建同级、按 Tab 新建子节点并编辑，双击编辑文字'
+      : '按 Enter 新建同级、按 Tab 新建下级并编辑，双击编辑文字'
+    const sortHint = mindmap ? '' : '；排序模式中可拖动到同级节点前方'
     node.setAttribute(
       'aria-label',
-      `节点：${label.replace(/\s+/g, ' ') || nodeId}；${keyboardHint}，按 Shift/Ctrl/Cmd+点击多选，按 Cmd/Ctrl+退格删除选中节点，按 Shift+F10 打开菜单`,
+      `节点：${label.replace(/\s+/g, ' ') || nodeId}；${keyboardHint}${sortHint}；按 Shift/Ctrl/Cmd+点击多选，按 Cmd/Ctrl+退格删除选中节点，按 Shift+F10 打开菜单`,
     )
     editableNodeIds.push(nodeId)
   }
@@ -1445,6 +1589,7 @@ function distanceToLineSegment(
 
 function handlePreviewPointerMove(event: PointerEvent) {
   if (updateEdgeDrag(event)) return
+  if (updateSortDrag(event)) return
   const stage = previewStage.value
   const drag = previewDragState
   if (!stage || !drag || event.pointerId !== drag.pointerId) return
@@ -1545,6 +1690,7 @@ function syncFullscreenState() {
 function resetPreviewAfterLayout(focusStage: boolean) {
   stopPreviewDrag()
   cancelEdgeDrag()
+  cancelSortDrag()
   cancelPendingZoomAnchor()
   nextTick(() => {
     window.requestAnimationFrame(() => {
@@ -1579,6 +1725,12 @@ function handlePreviewKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape' && edgeDrag.value) {
     event.preventDefault()
     cancelEdgeDrag()
+    return
+  }
+
+  if (event.key === 'Escape' && sortDrag.value) {
+    event.preventDefault()
+    cancelSortDrag()
     return
   }
 
@@ -1622,7 +1774,7 @@ function handlePreviewKeydown(event: KeyboardEvent) {
     if (!nodeId) return
     if (event.key === 'Tab' && !event.shiftKey) {
       event.preventDefault()
-      createKeyboardNode(nodeId, 'child')
+      createKeyboardNode(nodeId, 'child', true)
       return
     }
     if (event.key === 'Enter') {
@@ -1689,12 +1841,23 @@ watch(
     closeInlineNodeEditor(false)
     stopPreviewDrag()
     cancelEdgeDrag()
+    cancelSortDrag()
     closeDeleteConfirmation()
     closeMoveNodeDialog()
     cancelPendingZoomAnchor()
     await nextTick()
     prepareEditableNodes()
     if (nextSvg && previousSvg) restorePreviewPosition()
+    const inlineEditNodeId = pendingInlineEditNodeId
+    pendingInlineEditNodeId = null
+    if (inlineEditNodeId) {
+      const label = isMindmapDiagram.value
+        ? getMindmapLabel(props.activeDiagramCode, inlineEditNodeId)
+        : getFlowchartNodeLabel(props.activeDiagramCode, inlineEditNodeId)
+      if (label !== null && findEditableNodeById(inlineEditNodeId)) {
+        openNodeLabelEditor(inlineEditNodeId, label)
+      }
+    }
     schedulePendingNodeFocusRestore()
   },
   { flush: 'post' },
@@ -1704,7 +1867,10 @@ watch(() => props.activeDiagramCode, () => {
   dismissPreviewTransientState()
   closeInlineNodeEditor(false)
   clearNodeSelection()
-  if (isMindmapDiagram.value) connectionMode.value = false
+  if (!isFlowchartSource(props.activeDiagramCode)) {
+    connectionMode.value = false
+    sortMode.value = false
+  }
 })
 
 function handleWindowResize() {
@@ -1731,6 +1897,7 @@ onBeforeUnmount(() => {
   closeInlineNodeEditor(false)
   stopPreviewDrag()
   cancelEdgeDrag()
+  cancelSortDrag()
   closeDeleteConfirmation()
   closeMoveNodeDialog()
   cancelPendingZoomAnchor()
@@ -1754,6 +1921,61 @@ onBeforeUnmount(() => {
     :class="{ 'is-fallback-fullscreen': fallbackFullscreenActive }"
     aria-labelledby="preview-title"
   >
+    <Teleport defer to="#app-shortcut-host">
+      <details class="shortcut-help shortcut-help--app-header">
+        <summary>⌨ 快捷键</summary>
+        <div class="shortcut-help__panel">
+          <p class="shortcut-help__title">画布快捷键</p>
+          <dl>
+            <div>
+              <dt>双击节点</dt>
+              <dd>在画布内编辑文字</dd>
+            </div>
+            <div>
+              <dt>Tab</dt>
+              <dd>创建下一级节点并进入编辑</dd>
+            </div>
+            <div>
+              <dt>Enter</dt>
+              <dd>创建同级节点（脑图根节点例外）</dd>
+            </div>
+            <div>
+              <dt>Shift/Ctrl/Cmd + 点击</dt>
+              <dd>多选或取消选择节点</dd>
+            </div>
+            <div>
+              <dt>Cmd/Ctrl + 退格</dt>
+              <dd>删除选中节点</dd>
+            </div>
+            <div>
+              <dt>右键 / Shift+F10</dt>
+              <dd>打开节点、连线或批量菜单</dd>
+            </div>
+            <div>
+              <dt>Esc</dt>
+              <dd>取消编辑、关闭菜单或取消连线</dd>
+            </div>
+            <div>
+              <dt>Cmd/Ctrl + Z</dt>
+              <dd>撤销；Cmd/Ctrl + Shift + Z 重做</dd>
+            </div>
+            <div>
+              <dt>方向键 / PageUp / PageDown</dt>
+              <dd>移动画布视图</dd>
+            </div>
+            <div>
+              <dt>Ctrl + 滚轮</dt>
+              <dd>围绕指针缩放画布</dd>
+            </div>
+            <div>
+              <dt>排序模式</dt>
+              <dd>拖动流程图节点到同级节点前方调整顺序</dd>
+            </div>
+          </dl>
+        </div>
+      </details>
+    </Teleport>
+
     <header class="panel-header preview-header">
       <div class="panel-title-wrap">
         <span class="panel-icon panel-icon--blue"><ImageIcon :size="18" /></span>
@@ -1764,6 +1986,18 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="export-actions">
+        <button
+          v-if="!isMindmapDiagram"
+          class="button button--secondary sort-mode-button"
+          type="button"
+          :disabled="!canUseSortMode"
+          :aria-pressed="sortMode"
+          :title="sortMode ? '关闭排序模式' : '拖动节点到同级节点前方调整顺序；可用撤销恢复'"
+          @click="toggleSortMode"
+        >
+          <ArrowDownUp :size="16" />
+          {{ sortMode ? '退出排序模式' : '排序模式' }}
+        </button>
         <button
           v-if="!isMindmapDiagram"
           class="button button--secondary connection-mode-button"
@@ -1939,6 +2173,10 @@ onBeforeUnmount(() => {
 
     </div>
 
+    <span id="preview-scroll-help" class="sr-only">
+      可使用滚动条、触控板双指或鼠标拖拽移动；触控板捏合或 Ctrl 加滚轮缩放；也可使用方向键和翻页键查看。聚焦节点后可用 Tab 新建下级并编辑、Enter 新建同级，详细说明见页面顶部快捷键菜单。
+    </span>
+
     <div
       ref="previewStage"
       class="preview-stage"
@@ -1947,7 +2185,9 @@ onBeforeUnmount(() => {
         'is-pannable': Boolean(svgMarkup),
         'is-dragging': isDraggingPreview,
         'is-edge-dragging': Boolean(edgeDrag?.active),
+        'is-sort-dragging': Boolean(sortDrag?.active),
         'is-connect-mode': connectionMode,
+        'is-sort-mode': sortMode,
       }"
       :style="backgroundColor === 'transparent' ? undefined : { backgroundColor }"
       aria-label="图片预览画布"
@@ -2033,70 +2273,6 @@ onBeforeUnmount(() => {
         当前代码有误，暂时显示上一次成功的预览
       </div>
     </div>
-
-    <footer class="preview-footer">
-      <span id="preview-scroll-help" class="sr-only">
-        可使用滚动条、触控板双指或鼠标拖拽移动；触控板捏合或 Ctrl 加滚轮缩放；也可使用方向键和翻页键查看。
-      </span>
-      <span><i class="local-dot" />所有渲染与导出都在当前浏览器中完成</span>
-      <span>
-        {{
-          connectionMode
-            ? '连接模式：从起点拖到终点，箭头指向松开位置 · 回路会改变布局 · 右键删线或左侧撤销'
-            : isMindmapDiagram
-              ? '脑图：Tab 立即新建子节点 · Enter 立即新建同级（根节点时新建子节点） · 双击编辑文字 · Shift/Ctrl/Cmd+点击多选 · Cmd/Ctrl+退格批量删除 · 右键管理层级 · 层级由缩进维护 · 拖拽平移'
-              : '流程图：Tab 新建下级 · Enter 新建同级 · 双击编辑文字 · Shift/Ctrl/Cmd+点击多选 · Cmd/Ctrl+退格批量删除 · 开启连接模式后拖线 · 右键节点/连线管理 · 捏合缩放 · 拖拽平移'
-          }}
-      </span>
-      <details class="shortcut-help">
-        <summary>⌨ 快捷键</summary>
-        <div class="shortcut-help__panel">
-          <p class="shortcut-help__title">画布快捷键</p>
-          <dl>
-            <div>
-              <dt>双击节点</dt>
-              <dd>在画布内编辑文字</dd>
-            </div>
-            <div>
-              <dt>Tab</dt>
-              <dd>创建下一级节点</dd>
-            </div>
-            <div>
-              <dt>Enter</dt>
-              <dd>创建同级节点（脑图根节点例外）</dd>
-            </div>
-            <div>
-              <dt>Shift/Ctrl/Cmd + 点击</dt>
-              <dd>多选或取消选择节点</dd>
-            </div>
-            <div>
-              <dt>Cmd/Ctrl + 退格</dt>
-              <dd>删除选中节点</dd>
-            </div>
-            <div>
-              <dt>右键 / Shift+F10</dt>
-              <dd>打开节点、连线或批量菜单</dd>
-            </div>
-            <div>
-              <dt>Esc</dt>
-              <dd>取消编辑、关闭菜单或取消连线</dd>
-            </div>
-            <div>
-              <dt>Cmd/Ctrl + Z</dt>
-              <dd>撤销；Cmd/Ctrl + Shift + Z 重做</dd>
-            </div>
-            <div>
-              <dt>方向键 / PageUp / PageDown</dt>
-              <dd>移动画布视图</dd>
-            </div>
-            <div>
-              <dt>Ctrl + 滚轮</dt>
-              <dd>围绕指针缩放画布</dd>
-            </div>
-          </dl>
-        </div>
-      </details>
-    </footer>
 
     <div
       v-if="contextMenu"
@@ -2458,10 +2634,8 @@ onBeforeUnmount(() => {
 
 .preview-panel:fullscreen .preview-header,
 .preview-panel:fullscreen .settings-bar,
-.preview-panel:fullscreen .preview-footer,
 .preview-panel.is-fallback-fullscreen .preview-header,
-.preview-panel.is-fallback-fullscreen .settings-bar,
-.preview-panel.is-fallback-fullscreen .preview-footer {
+.preview-panel.is-fallback-fullscreen .settings-bar {
   padding-inline: 22px;
 }
 
@@ -2701,6 +2875,19 @@ onBeforeUnmount(() => {
   user-select: none;
 }
 
+.preview-stage.is-sort-mode .diagram :deep(g.node.is-node-editable),
+.preview-stage.is-sort-mode .diagram :deep(g.rough-node.is-node-editable) {
+  cursor: grab;
+}
+
+.preview-stage.is-sort-dragging,
+.preview-stage.is-sort-dragging .diagram-viewport,
+.preview-stage.is-sort-dragging .diagram :deep(g.node.is-node-editable),
+.preview-stage.is-sort-dragging .diagram :deep(g.rough-node.is-node-editable) {
+  cursor: grabbing;
+  user-select: none;
+}
+
 .preview-stage.is-edge-dragging .diagram :deep(g.node.is-node-editable),
 .preview-stage.is-edge-dragging .diagram :deep(g.rough-node.is-node-editable) {
   cursor: crosshair;
@@ -2803,6 +2990,13 @@ onBeforeUnmount(() => {
   box-shadow: inset 0 0 0 1px rgb(99 102 241 / 12%);
 }
 
+.sort-mode-button[aria-pressed='true'] {
+  color: var(--primary-strong);
+  border-color: #aaa5ef;
+  background: #f1f0ff;
+  box-shadow: inset 0 0 0 1px rgb(99 102 241 / 12%);
+}
+
 .diagram-kind-label {
   display: inline-flex;
   align-items: center;
@@ -2821,6 +3015,19 @@ onBeforeUnmount(() => {
 .diagram :deep(g.node.is-edge-drop-target),
 .diagram :deep(g.rough-node.is-edge-drop-target) {
   filter: drop-shadow(0 0 0.45rem rgb(99 102 241 / 72%));
+}
+
+.diagram :deep(g.node.is-sort-drop-target),
+.diagram :deep(g.rough-node.is-sort-drop-target) {
+  filter:
+    drop-shadow(0 0 0.2rem #fff)
+    drop-shadow(0 0 0.55rem rgb(14 165 233 / 88%));
+}
+
+.diagram :deep(g.node.is-sort-drop-target :is(rect, polygon, circle, ellipse, path)),
+.diagram :deep(g.rough-node.is-sort-drop-target :is(rect, polygon, circle, ellipse, path)) {
+  stroke: #0284c7 !important;
+  stroke-width: 4px !important;
 }
 
 .diagram :deep(g.node.is-node-editable:focus-visible),
@@ -3180,28 +3387,15 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-.preview-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  min-height: 40px;
-  padding: 8px 14px;
-  color: var(--text-faint);
-  border-top: 1px solid var(--border);
-  background: #fbfbfd;
-  font-size: 11.5px;
-}
-
-.preview-footer span {
-  display: inline-flex;
-  align-items: center;
-}
-
 .shortcut-help {
   position: relative;
   flex: 0 0 auto;
   color: var(--text-secondary);
+}
+
+.shortcut-help--app-header .shortcut-help__panel {
+  top: calc(100% + 8px);
+  bottom: auto;
 }
 
 .shortcut-help summary {
@@ -3301,15 +3495,6 @@ onBeforeUnmount(() => {
   border: 0;
 }
 
-.local-dot {
-  width: 6px;
-  height: 6px;
-  margin-right: 7px;
-  border-radius: 999px;
-  background: #36b68a;
-  box-shadow: 0 0 0 3px #daf4ea;
-}
-
 @media (max-width: 1220px) {
   .select-control > span:first-child {
     display: none;
@@ -3330,10 +3515,8 @@ onBeforeUnmount(() => {
 @media (max-width: 640px) {
   .preview-panel:fullscreen .panel-subtitle,
   .preview-panel:fullscreen .output-size,
-  .preview-panel:fullscreen .preview-footer,
   .preview-panel.is-fallback-fullscreen .panel-subtitle,
-  .preview-panel.is-fallback-fullscreen .output-size,
-  .preview-panel.is-fallback-fullscreen .preview-footer {
+  .preview-panel.is-fallback-fullscreen .output-size {
     display: none;
   }
 
@@ -3363,9 +3546,6 @@ onBeforeUnmount(() => {
     width: 100%;
   }
 
-  .preview-footer span:last-child {
-    display: none;
-  }
 }
 
 /* 全屏工具栏始终保持单行；窄屏通过横向滚动访问全部设置。 */

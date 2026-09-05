@@ -11,6 +11,7 @@ import {
   insertFlowchartSiblingNode,
   insertFlowchartEdge,
   isEditableFlowchartNodeId,
+  reorderFlowchartNode,
   replaceMermaidBlockCode,
   updateFlowchartNodeLabel,
 } from './editFlowchartNode'
@@ -357,6 +358,69 @@ describe('流程图节点文字编辑', () => {
     })
   })
 
+  it('新增子节点追加到同一父节点的出边末尾', () => {
+    const source = [
+      'flowchart TD',
+      '  A[父节点] --> 15[第一个]',
+      '  A --> 14[第二个]',
+      '  A --> 13[第三个]',
+      '  B[其他节点] --> C',
+    ].join('\n')
+
+    expect(insertFlowchartNode(source, 'rectangle', '追加节点', 'A')).toEqual({
+      source: [
+        'flowchart TD',
+        '  A[父节点] --> 15[第一个]',
+        '  A --> 14[第二个]',
+        '  A --> 13[第三个]',
+        '  A --> newNode1["追加节点"]',
+        '  B[其他节点] --> C',
+      ].join('\n'),
+      nodeId: 'newNode1',
+    })
+  })
+
+  it('按同一父节点的目标位置重排节点，并保留原始换行', () => {
+    const source = [
+      'flowchart TD',
+      '  A[父节点] --> 15[第一个]',
+      '  A --> 14[第二个]',
+      '  A --> 13[第三个]',
+      '  A --> 12[第四个]',
+    ].join('\n')
+
+    expect(reorderFlowchartNode(source, '15', '13')).toBe(
+      [
+        'flowchart TD',
+        '  A --> 14[第二个]',
+        '  A[父节点] --> 15[第一个]',
+        '  A --> 13[第三个]',
+        '  A --> 12[第四个]',
+      ].join('\n'),
+    )
+    expect(
+      reorderFlowchartNode(source.replace(/\n/g, '\r\n'), '13', '15'),
+    ).toBe(
+      [
+        'flowchart TD',
+        '  A --> 13[第三个]',
+        '  A[父节点] --> 15[第一个]',
+        '  A --> 14[第二个]',
+        '  A --> 12[第四个]',
+      ].join('\r\n'),
+    )
+  })
+
+  it('排序拒绝不同父节点、复杂链路和多入边节点', () => {
+    expect(
+      reorderFlowchartNode('flowchart TD\n  A --> B\n  A --> C\n  D --> E', 'B', 'E'),
+    ).toBeNull()
+    expect(reorderFlowchartNode('flowchart TD\n  A --> B --> C', 'B', 'C')).toBeNull()
+    expect(
+      reorderFlowchartNode('flowchart TD\n  A --> B\n  C --> B\n  A --> D', 'B', 'D'),
+    ).toBeNull()
+  })
+
   it('按入边复制同级关系，不把同级节点误连成当前节点的下级', () => {
     const source = [
       'flowchart TD',
@@ -369,8 +433,8 @@ describe('流程图节点文字编辑', () => {
       source: [
         'flowchart TD',
         '  A[上游] --> B[当前]',
-        '  A --> newNode1',
         '  A --> C[其他同级]',
+        '  A --> newNode1',
         '  B --> D[下级]',
         '  newNode1["新同级"]',
       ].join('\n'),
@@ -390,9 +454,9 @@ describe('流程图节点文字编辑', () => {
       [
         'flowchart TD',
         '  A[收到需求] --> B{信息完整吗？}',
-        '  B --> newNode1',
         '  B -- 是 --> C[开始实现]',
         '  B -- 否 --> D[补充需求]',
+        '  B --> newNode1',
         '  newNode1["新同级"]',
       ].join('\n'),
     )

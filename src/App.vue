@@ -27,6 +27,8 @@ import {
   insertFlowchartEdge,
   insertFlowchartNode,
   insertFlowchartSiblingNode,
+  isFlowchartSource,
+  reorderFlowchartNode,
   replaceMermaidBlockCode,
   updateFlowchartNodeLabel,
   type FlowchartNodeShape,
@@ -547,6 +549,34 @@ function connectNodes(fromNodeId: string, toNodeId: string) {
   )
 }
 
+function reorderNode(nodeId: string, targetNodeId: string) {
+  const diagram = activeDiagram.value
+  if (!diagram || !isFlowchartSource(diagram.code)) return
+
+  const nextDiagramCode = reorderFlowchartNode(
+    diagram.code,
+    nodeId,
+    targetNodeId,
+  )
+  if (nextDiagramCode === null) {
+    showToast('暂时无法安全调整这个节点，请通过左侧源码排序。', 'error')
+    return
+  }
+
+  const nextDocument = replaceMermaidBlockCode(
+    code.value,
+    diagram,
+    nextDiagramCode,
+  )
+  if (nextDocument === null) {
+    showToast('源码已经变化，请重新拖拽排序。', 'error')
+    return
+  }
+
+  code.value = nextDocument
+  showToast('节点顺序已调整，可用撤回恢复。', 'success')
+}
+
 function showToast(message: string, type: 'success' | 'error') {
   window.clearTimeout(toastTimer)
   toast.value = { message, type }
@@ -672,6 +702,7 @@ onBeforeUnmount(() => {
             <span>恢复</span>
           </button>
         </div>
+        <div id="app-shortcut-host" class="header-shortcut-host" />
         <span class="privacy-badge" title="代码不会发送到任何服务器">
           <ShieldCheck :size="15" />
           纯本地运行 · 数据不上传
@@ -758,6 +789,7 @@ onBeforeUnmount(() => {
           @delete-nodes="deleteNodes"
           @delete-edge="deleteEdge"
           @connect-nodes="connectNodes"
+          @reorder-node="reorderNode"
           @move-node="moveNode"
         />
       </div>

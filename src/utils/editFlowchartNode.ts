@@ -122,18 +122,29 @@ export function insertFlowchartNode(
     }
   }
 
+  const outgoingLine = findLastFlowchartOutgoingLine(source, afterNodeId)
   const lineStart =
+    outgoingLine?.start ??
     Math.max(
       source.lastIndexOf('\n', Math.max(0, anchor.start - 1)),
       source.lastIndexOf('\r', Math.max(0, anchor.start - 1)),
     ) + 1
   const nextLineBreak = source.slice(anchor.end).match(/\r\n|\r|\n/)
-  const lineEnd = nextLineBreak ? anchor.end + nextLineBreak.index! : -1
-  const indentation = source.slice(lineStart, lineEnd < 0 ? source.length : lineEnd).match(/^\s*/)?.[0] ?? '  '
+  const lineEnd = outgoingLine
+    ? outgoingLine.lineEnding
+      ? outgoingLine.contentEnd
+      : -1
+    : nextLineBreak
+      ? anchor.end + nextLineBreak.index!
+      : -1
+  const indentation =
+    outgoingLine?.indentation ??
+    source.slice(lineStart, lineEnd < 0 ? source.length : lineEnd).match(/^\s*/)?.[0] ??
+    '  '
   const statement = `${indentation}${afterNodeId} --> ${declaration}`
 
   if (lineEnd < 0) return { source: `${source}${lineEnding}${statement}`, nodeId }
-  const actualLineEnding = nextLineBreak?.[0] ?? lineEnding
+  const actualLineEnding = outgoingLine?.lineEnding ?? nextLineBreak?.[0] ?? lineEnding
   return {
     source: `${source.slice(0, lineEnd + actualLineEnding.length)}${statement}${actualLineEnding}${source.slice(lineEnd + actualLineEnding.length)}`,
     nodeId,
@@ -429,22 +440,30 @@ export function insertFlowchartEdge(
   const anchor = findNodeLabelRange(source, fromNodeId)
   if (!anchor) return null
 
+  const outgoingLine = findLastFlowchartOutgoingLine(source, fromNodeId)
   const lineStart =
+    outgoingLine?.start ??
     Math.max(
       source.lastIndexOf('\n', Math.max(0, anchor.start - 1)),
       source.lastIndexOf('\r', Math.max(0, anchor.start - 1)),
     ) + 1
   const nextLineBreak = source.slice(anchor.end).search(/\r\n|\r|\n/)
-  const lineEnd = nextLineBreak < 0 ? -1 : anchor.end + nextLineBreak
+  const lineEnd = outgoingLine
+    ? outgoingLine.lineEnding
+      ? outgoingLine.contentEnd
+      : -1
+    : nextLineBreak < 0
+      ? -1
+      : anchor.end + nextLineBreak
   const line = source.slice(lineStart, lineEnd < 0 ? source.length : lineEnd)
-  const indentation = line.match(/^\s*/)?.[0] ?? '  '
+  const indentation = outgoingLine?.indentation ?? line.match(/^\s*/)?.[0] ?? '  '
   const statement = `${indentation}${fromNodeId} --> ${toNodeId}`
 
   const defaultLineEnding = source.match(/\r\n|\r|\n/)?.[0] ?? '\n'
   if (lineEnd < 0) return `${source}${defaultLineEnding}${statement}`
-  const lineEnding = source.startsWith('\r\n', lineEnd)
+  const lineEnding = outgoingLine?.lineEnding ?? (source.startsWith('\r\n', lineEnd)
     ? '\r\n'
-    : source[lineEnd] ?? defaultLineEnding
+    : source[lineEnd] ?? defaultLineEnding)
   return `${source.slice(0, lineEnd + lineEnding.length)}${statement}${lineEnding}${source.slice(lineEnd + lineEnding.length)}`
 }
 
@@ -471,6 +490,121 @@ export function replaceMermaidBlockCode(
     formattedCode +
     documentSource.slice(block.endOffset)
   )
+}
+
+export function reorderFlowchartNode(
+  source: string,
+  nodeId: string,
+  targetNodeId: string,
+): string | null {
+  if (
+    !isFlowchartSource(source) ||
+    nodeId === targetNodeId ||
+    !isEditableFlowchartNodeId(nodeId) ||
+    !isEditableFlowchartNodeId(targetNodeId) ||
+    getFlowchartNodeLabel(source, nodeId) === null ||
+    getFlowchartNodeLabel(source, targetNodeId) === null
+  ) {
+    return null
+  }
+
+  const sourceLine = findSimpleIncomingEdgeLine(source, nodeId)
+  const targetLine = findSimpleIncomingEdgeLine(source, targetNodeId)
+  if (!sourceLine || !targetLine || sourceLine.index === targetLine.index) return null
+
+  const sourceParents = getFlowchartParentNodeIds(source, nodeId)
+  const targetParents = getFlowchartParentNodeIds(source, targetNodeId)
+  if (
+    sourceParents.length !== 1 ||
+    targetParents.length !== 1 ||
+    sourceParents[0] !== targetParents[0] ||
+    sourceLine.indentation !== targetLine.indentation
+  ) {
+    return null
+  }
+
+  const lines = sourceLine.lines.map((line) => line.text)
+  const sourceText = lines.splice(sourceLine.index, 1)[0]
+  const targetIndex = sourceLine.index < targetLine.index ? targetLine.index - 1 : targetLine.index
+  lines.splice(targetIndex, 0, sourceText)
+
+  return lines
+    .map((line, index) => `${line}${sourceLine.lines[index].ending}`)
+    .join('')
+}
+
+function findLastFlowchartOutgoingLine(
+  source: string,
+  nodeId: string,
+): { start: number; contentEnd: number; lineEnding: string; indentation: string } | null {
+  let last: { start: number; contentEnd: number; lineEnding: string; indentation: string } | null = null
+  const linePattern = /[^\r\n]*(?:\r\n|\r|\n|$)/g
+  let match: RegExpExecArray | null
+
+  while ((match = linePattern.exec(source)) && match[0]) {
+    const rawLine = match[0]
+    const lineEnding = rawLine.match(/\r\n|\r|\n$/)?.[0] ?? ''
+    const line = lineEnding ? rawLine.slice(0, -lineEnding.length) : rawLine
+    if (IGNORED_LINE_PATTERN.test(line)) continue
+
+    const code = line.slice(0, findUnquotedToken(line, '%%'))
+    const hasOutgoingEdge = splitUnquoted(code, ';').some((segment) =>
+      findFlowchartEdgeMatches(segment, findFlowchartNodeTokens(segment)).some(
+        (edge) => edge.from.id === nodeId,
+      ),
+    )
+    if (!hasOutgoingEdge) continue
+
+    last = {
+      start: match.index,
+      contentEnd: match.index + line.length,
+      lineEnding,
+      indentation: line.match(/^\s*/)?.[0] ?? '  ',
+    }
+  }
+
+  return last
+}
+
+function findSimpleIncomingEdgeLine(
+  source: string,
+  nodeId: string,
+): {
+  index: number
+  indentation: string
+  lines: Array<{ text: string; ending: string }>
+} | null {
+  const lines: Array<{ text: string; ending: string }> = []
+  const linePattern = /[^\r\n]*(?:\r\n|\r|\n|$)/g
+  let candidateIndex = -1
+  let match: RegExpExecArray | null
+
+  while ((match = linePattern.exec(source)) && match[0]) {
+    const rawLine = match[0]
+    const ending = rawLine.match(/\r\n|\r|\n$/)?.[0] ?? ''
+    const text = ending ? rawLine.slice(0, -ending.length) : rawLine
+    lines.push({ text, ending })
+
+    if (IGNORED_LINE_PATTERN.test(text)) continue
+    const code = text.slice(0, findUnquotedToken(text, '%%'))
+    const segments = splitUnquoted(code, ';')
+    if (segments.length !== 1) continue
+
+    const edges = findFlowchartEdgeMatches(
+      segments[0],
+      findFlowchartNodeTokens(segments[0]),
+    )
+    if (edges.length !== 1 || edges[0].to.id !== nodeId) continue
+    if (candidateIndex >= 0) return null
+    candidateIndex = lines.length - 1
+  }
+
+  if (candidateIndex < 0) return null
+  return {
+    index: candidateIndex,
+    indentation: lines[candidateIndex].text.match(/^\s*/)?.[0] ?? '',
+    lines,
+  }
 }
 
 function findNodeLabelRange(source: string, nodeId: string): NodeLabelRange | null {

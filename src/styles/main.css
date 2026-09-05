@@ -123,6 +123,11 @@ a:focus-visible {
   gap: 5px;
 }
 
+.header-shortcut-host {
+  display: inline-flex;
+  align-items: center;
+}
+
 .history-control {
   display: inline-flex;
   align-items: center;
