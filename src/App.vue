@@ -23,6 +23,7 @@ import { extractMermaidBlocks } from './utils/extractMermaidBlocks'
 import {
   deleteFlowchartEdge,
   deleteFlowchartNode,
+  deleteFlowchartNodes,
   insertFlowchartEdge,
   insertFlowchartNode,
   insertFlowchartSiblingNode,
@@ -32,6 +33,7 @@ import {
 } from './utils/editFlowchartNode'
 import {
   deleteMindmapNode,
+  deleteMindmapNodes,
   insertMindmapNode,
   insertMindmapSibling,
   isMindmapSource,
@@ -423,6 +425,52 @@ function deleteNode(nodeId: string) {
   )
 }
 
+function deleteNodes(nodeIds: string[]) {
+  const diagram = activeDiagram.value
+  if (!diagram || nodeIds.length < 2) return
+
+  const uniqueIds = [...new Set(nodeIds)]
+  const mindmap = isMindmapSource(diagram.code)
+  let nextDiagramCode: string | null
+
+  if (mindmap) {
+    const indices = uniqueIds.map(getMindmapNodeIndex)
+    nextDiagramCode = indices.some((index) => index === null)
+      ? null
+      : deleteMindmapNodes(diagram.code, indices)
+  } else {
+    nextDiagramCode = deleteFlowchartNodes(diagram.code, uniqueIds)
+  }
+
+  if (nextDiagramCode === null) {
+    showToast(
+      mindmap
+        ? '暂时无法批量删除这些脑图节点，请重新选择后重试。'
+        : '暂时无法批量删除这些节点，请重新选择后重试。',
+      'error',
+    )
+    return
+  }
+
+  const nextDocument = replaceMermaidBlockCode(
+    code.value,
+    diagram,
+    nextDiagramCode,
+  )
+  if (nextDocument === null) {
+    showToast('源码已经变化，请重新选择节点后再试。', 'error')
+    return
+  }
+
+  code.value = nextDocument
+  showToast(
+    mindmap
+      ? '已删除选中的脑图节点及相关子树，可用一次撤销恢复。'
+      : `已删除选中的 ${uniqueIds.length} 个节点及相关连线，可用一次撤销恢复。`,
+    'success',
+  )
+}
+
 function deleteEdge(fromNodeId: string, toNodeId: string, occurrence = 0) {
   const diagram = activeDiagram.value
   if (!diagram) return
@@ -707,6 +755,7 @@ onBeforeUnmount(() => {
           @edit-node-label="editNodeLabel"
           @insert-node="insertNode"
           @delete-node="deleteNode"
+          @delete-nodes="deleteNodes"
           @delete-edge="deleteEdge"
           @connect-nodes="connectNodes"
           @move-node="moveNode"

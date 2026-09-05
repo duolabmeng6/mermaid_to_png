@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   deleteMindmapNode,
+  deleteMindmapNodes,
   getMindmapNodeIdFromDomId,
   getMindmapNodeIndexFromDomId,
   getMindmapNodeLabel,
@@ -216,6 +217,19 @@ describe('脑图节点源码编辑', () => {
   it('删除子树时一并删除只属于该子树的 Mermaid 注释', () => {
     const withComment = 'mindmap\n  root((根))\n    分支\n      %% 分支说明\n      子项\n    兄弟'
     expect(deleteMindmapNode(withComment, 1)).toBe('mindmap\n  root((根))\n    兄弟')
+  })
+
+  it('批量删除按原索引倒序处理，并让父节点覆盖已选子节点', () => {
+    expect(deleteMindmapNodes(source, [1, 2, 5])).toBe(
+      [
+        'mindmap',
+        '  root((中心主题))',
+        '    方案设计',
+        '      页面结构',
+      ].join('\n'),
+    )
+    expect(deleteMindmapNodes(source, [0, 1])).toBeNull()
+    expect(deleteMindmapNodes(source, [99])).toBeNull()
   })
 
   it('删除末尾分支的完整子树，后续新增仍保持正确层级', () => {

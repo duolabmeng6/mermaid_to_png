@@ -78,7 +78,6 @@ interface EdgeDragState {
 }
 
 type NodeEditorState =
-  | { mode: 'edit'; nodeId: string; label: string }
   | { mode: 'view'; nodeId: string; label: string }
   | {
       mode: 'insert'
@@ -99,6 +98,16 @@ interface DiagramContextMenu {
   y: number
   nodeId: string | null
   edge: FlowchartEdge | null
+  nodeIds: string[]
+}
+
+interface InlineNodeEditorState {
+  nodeId: string
+  label: string
+  left: number
+  top: number
+  width: number
+  height: number
 }
 
 const PRESET_PREVIEW_ZOOMS = [0.5, 0.75, 1, 1.25]
@@ -146,6 +155,7 @@ const emit = defineEmits<{
     relation: 'child' | 'sibling',
   ]
   deleteNode: [nodeId: string]
+  deleteNodes: [nodeIds: string[]]
   deleteEdge: [fromNodeId: string, toNodeId: string, occurrence: number]
   connectNodes: [fromNodeId: string, toNodeId: string]
   moveNode: [nodeId: string, newParentNodeId: string]
@@ -161,13 +171,22 @@ const deleteConfirmationDialog = ref<HTMLDialogElement | null>(null)
 const moveNodeDialog = ref<HTMLDialogElement | null>(null)
 const moveNodeSelect = ref<HTMLSelectElement | null>(null)
 const editingNode = ref<NodeEditorState | null>(null)
-const deleteConfirmation = ref<{ nodeId: string; label: string; suffix: string } | null>(null)
+const inlineNodeEditorInput = ref<HTMLTextAreaElement | null>(null)
+const inlineEditingNode = ref<InlineNodeEditorState | null>(null)
+const deleteConfirmation = ref<{
+  nodeId: string
+  label: string
+  suffix: string
+  nodeIds?: string[]
+} | null>(null)
 const movingNode = ref<MindmapMoveState | null>(null)
 const contextMenuElement = ref<HTMLElement | null>(null)
 const contextMenu = ref<DiagramContextMenu | null>(null)
+const selectedNodeIds = ref<Set<string>>(new Set())
 const edgeDrag = ref<EdgeDragState | null>(null)
 const connectionMode = ref(false)
 const nodeEditorPending = ref(false)
+const inlineNodeEditorPending = ref(false)
 const previewZoom = ref<PreviewZoom>(1)
 const isDraggingPreview = ref(false)
 const nativeFullscreenActive = ref(false)
@@ -177,6 +196,10 @@ const isFullscreen = computed(
   () => nativeFullscreenActive.value || fallbackFullscreenActive.value,
 )
 const canSaveNodeLabel = computed(() => Boolean(editingNode.value?.label.trim()))
+const canDeleteSelectedNodes = computed(() => {
+  const ids = contextMenu.value?.nodeIds ?? []
+  return ids.length > 1 && !(isMindmapDiagram.value && ids.includes('node_0'))
+})
 let previousBodyOverflow = ''
 let previewDragState: PreviewDragState | null = null
 let zoomAnchorRevision = 0
@@ -187,6 +210,7 @@ let edgeDropTarget: SVGGElement | null = null
 let preparedDiagramCode = ''
 let pendingNodeFocusId: string | null = null
 let pendingNodeFocusFallbackId: string | null = null
+let inlineEditorBlurTimer: number | undefined
 const themeGroups = (Object.keys(themeGroupLabels) as Array<keyof typeof themeGroupLabels>).map(
   (group) => ({
     id: group,
@@ -284,6 +308,17 @@ const edgeDragLine = computed(() => {
   }
 })
 
+const inlineNodeEditorStyle = computed(() => {
+  const editor = inlineEditingNode.value
+  if (!editor) return undefined
+  return {
+    left: `${editor.left}px`,
+    top: `${editor.top}px`,
+    width: `${editor.width}px`,
+    height: `${editor.height}px`,
+  }
+})
+
 function updateTheme(event: Event) {
   emit('update:theme', (event.target as HTMLSelectElement).value as MermaidTheme)
 }
@@ -348,9 +383,32 @@ function findEditableNodeById(nodeId: string): SVGGElement | null {
   return Array.from(nodes).find((node) => node.dataset.id === nodeId) ?? null
 }
 
+function getInlineNodeEditorPosition(nodeId: string) {
+  const node = findEditableNodeById(nodeId)
+  const stage = previewStage.value
+  if (!node || !stage) return null
+
+  const nodeRect = node.getBoundingClientRect()
+  const stageRect = stage.getBoundingClientRect()
+  return {
+    left: nodeRect.left - stageRect.left + stage.scrollLeft,
+    top: nodeRect.top - stageRect.top + stage.scrollTop,
+    width: Math.max(80, nodeRect.width),
+    height: Math.max(32, nodeRect.height),
+  }
+}
+
+function syncInlineNodeEditorPosition() {
+  const editor = inlineEditingNode.value
+  if (!editor) return
+  const position = getInlineNodeEditorPosition(editor.nodeId)
+  if (!position) return
+  inlineEditingNode.value = { ...editor, ...position }
+}
+
 function restorePendingNodeFocus() {
   const nodeId = pendingNodeFocusId
-  if (!nodeId) return
+  if (!nodeId || inlineEditingNode.value) return
   const fallbackNodeId = pendingNodeFocusFallbackId
   const node =
     findEditableNodeById(nodeId) ??
@@ -383,6 +441,7 @@ function setPendingNodeFocus(nodeId: string, fallbackNodeId: string | null = nul
 
 function handlePreviewScroll() {
   rememberPreviewPosition()
+  syncInlineNodeEditorPosition()
   closeContextMenu()
 }
 
@@ -424,6 +483,7 @@ async function setPreviewZoomAt(nextZoom: number, clientX: number, clientY: numb
   const adjustment = getScrollAdjustment(newRect, anchor, clientX, clientY)
   stage.scrollLeft += adjustment.left
   stage.scrollTop += adjustment.top
+  syncInlineNodeEditorPosition()
 }
 
 function handlePreviewWheel(event: WheelEvent) {
@@ -479,6 +539,7 @@ function handlePreviewPointerDown(event: PointerEvent) {
     event.button === 0 &&
     !isInteractiveTarget
   ) {
+    window.getSelection()?.removeAllRanges()
     node.focus({ preventScroll: true })
     return
   }
@@ -513,8 +574,21 @@ function handlePreviewPointerDown(event: PointerEvent) {
 function handlePreviewClick(event: MouseEvent) {
   if (connectionMode.value || !(event.target instanceof Element)) return
   const node = getEditableNode(event.target)
-  if (!node || event.button !== 0 || event.defaultPrevented) return
+  if (event.button !== 0 || event.defaultPrevented) return
   if (event.target.closest('a, button, input, select, textarea')) return
+  if (!node) {
+    if (!event.shiftKey && !event.ctrlKey && !event.metaKey) clearNodeSelection()
+    return
+  }
+
+  const nodeId = node.dataset.id
+  if (!nodeId) return
+  if (event.shiftKey || event.ctrlKey || event.metaKey) {
+    event.preventDefault()
+    toggleNodeSelection(nodeId)
+  } else {
+    setNodeSelection(nodeId)
+  }
   node.focus({ preventScroll: true })
 }
 
@@ -530,6 +604,47 @@ function getEditableNode(target: EventTarget | null): SVGGElement | null {
     'g.node.is-node-editable[data-id], g.rough-node.is-node-editable[data-id]',
   )
   return node && diagramElement.value?.contains(node) ? node : null
+}
+
+function syncSelectedNodeClasses() {
+  const nodes = diagramElement.value?.querySelectorAll<SVGGElement>(
+    'g.node.is-node-editable[data-id], g.rough-node.is-node-editable[data-id]',
+  ) ?? []
+
+  for (const node of nodes) {
+    const selected = selectedNodeIds.value.has(node.dataset.id ?? '')
+    node.classList.toggle('is-node-selected', selected)
+    node.setAttribute('aria-selected', String(selected))
+    node.setAttribute('aria-pressed', String(selected))
+  }
+}
+
+function clearNodeSelection() {
+  selectedNodeIds.value = new Set()
+  syncSelectedNodeClasses()
+}
+
+function setNodeSelection(nodeId: string) {
+  selectedNodeIds.value = new Set([nodeId])
+  syncSelectedNodeClasses()
+}
+
+function toggleNodeSelection(nodeId: string) {
+  const next = new Set(selectedNodeIds.value)
+  if (next.has(nodeId)) next.delete(nodeId)
+  else next.add(nodeId)
+  selectedNodeIds.value = next
+  syncSelectedNodeClasses()
+}
+
+function selectNodeForContextMenu(nodeId: string | null, toggle = false) {
+  if (!nodeId) {
+    clearNodeSelection()
+    return
+  }
+  if (toggle) toggleNodeSelection(nodeId)
+  else if (!selectedNodeIds.value.has(nodeId)) setNodeSelection(nodeId)
+  syncSelectedNodeClasses()
 }
 
 function getMindmapLabel(source: string, nodeId: string): string | null {
@@ -645,14 +760,89 @@ function openNodeEditor(node: SVGGElement) {
 }
 
 function openNodeLabelEditor(nodeId: string, label: string) {
+  const position = getInlineNodeEditorPosition(nodeId)
+  if (!position) return
+
+  closeInlineNodeEditor(false)
   setPendingNodeFocus(nodeId)
   closeContextMenu()
-  editingNode.value = { mode: 'edit', nodeId, label }
+  findEditableNodeById(nodeId)?.classList.add('is-inline-editing')
+  inlineEditingNode.value = { nodeId, label, ...position }
   void nextTick().then(() => {
-    nodeEditorDialog.value?.showModal()
-    nodeEditorInput.value?.focus()
-    nodeEditorInput.value?.select()
+    syncInlineNodeEditorPosition()
+    inlineNodeEditorInput.value?.focus()
+    inlineNodeEditorInput.value?.select()
   })
+}
+
+function closeInlineNodeEditor(restoreFocus = true) {
+  const nodeId = inlineEditingNode.value?.nodeId
+  if (nodeId) findEditableNodeById(nodeId)?.classList.remove('is-inline-editing')
+  if (inlineEditorBlurTimer !== undefined) {
+    window.clearTimeout(inlineEditorBlurTimer)
+    inlineEditorBlurTimer = undefined
+  }
+  inlineEditingNode.value = null
+  inlineNodeEditorPending.value = false
+  if (restoreFocus) schedulePendingNodeFocusRestore()
+}
+
+function handleInlineNodeEditorBlur() {
+  const nodeId = inlineEditingNode.value?.nodeId
+  if (!nodeId) return
+  if (inlineEditorBlurTimer !== undefined) window.clearTimeout(inlineEditorBlurTimer)
+  inlineEditorBlurTimer = window.setTimeout(() => {
+    inlineEditorBlurTimer = undefined
+    if (inlineEditingNode.value?.nodeId !== nodeId) return
+    if (document.activeElement === inlineNodeEditorInput.value) return
+    void saveInlineNodeLabel()
+  }, 0)
+}
+
+function handleInlineNodeEditorKeydown(event: KeyboardEvent) {
+  event.stopPropagation()
+  if (event.isComposing) return
+
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeInlineNodeEditor()
+    return
+  }
+
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    void saveInlineNodeLabel()
+  }
+}
+
+async function saveInlineNodeLabel() {
+  const editor = inlineEditingNode.value
+  if (!editor || inlineNodeEditorPending.value) return
+  const label = editor.label.trim()
+  if (!label) {
+    inlineNodeEditorInput.value?.focus()
+    return
+  }
+
+  const currentLabel = isMindmapDiagram.value
+    ? getMindmapLabel(props.activeDiagramCode, editor.nodeId)
+    : getFlowchartNodeLabel(props.activeDiagramCode, editor.nodeId)
+  if (currentLabel === label) {
+    closeInlineNodeEditor()
+    return
+  }
+
+  const previousCode = props.activeDiagramCode
+  inlineNodeEditorPending.value = true
+  emit('editNodeLabel', editor.nodeId, label)
+
+  await nextTick()
+  inlineNodeEditorPending.value = false
+  if (props.activeDiagramCode !== previousCode) {
+    closeInlineNodeEditor()
+  } else {
+    inlineNodeEditorInput.value?.focus()
+  }
 }
 
 function openNodeInspector() {
@@ -690,8 +880,13 @@ function handleNodeEditorClose() {
   schedulePendingNodeFocusRestore()
 }
 
-function openDeleteConfirmation(nodeId: string, label: string, suffix: string) {
-  deleteConfirmation.value = { nodeId, label, suffix }
+function openDeleteConfirmation(
+  nodeId: string,
+  label: string,
+  suffix: string,
+  nodeIds?: string[],
+) {
+  deleteConfirmation.value = { nodeId, label, suffix, nodeIds }
   void nextTick().then(() => {
     deleteConfirmationDialog.value?.showModal()
     deleteConfirmationDialog.value
@@ -708,35 +903,20 @@ function closeDeleteConfirmation() {
 function switchNodeInspectorToEdit() {
   const edit = editingNode.value
   if (!edit || edit.mode !== 'view') return
-  editingNode.value = { mode: 'edit', nodeId: edit.nodeId, label: edit.label }
-  void nextTick().then(() => {
-    nodeEditorInput.value?.focus()
-    nodeEditorInput.value?.select()
-  })
+  closeNodeEditor()
+  openNodeLabelEditor(edit.nodeId, edit.label)
 }
 
 async function saveNodeLabel() {
   const edit = editingNode.value
-  if (!edit || !edit.label.trim() || nodeEditorPending.value) {
+  if (!edit || edit.mode === 'view' || !edit.label.trim() || nodeEditorPending.value) {
     nodeEditorInput.value?.focus()
     return
   }
 
-  if (edit.mode === 'view') return
-  if (edit.mode === 'edit') {
-    const currentLabel = isMindmapDiagram.value
-      ? getMindmapLabel(props.activeDiagramCode, edit.nodeId)
-      : getFlowchartNodeLabel(props.activeDiagramCode, edit.nodeId)
-    if (currentLabel === edit.label.trim()) {
-      closeNodeEditor()
-      return
-    }
-  }
-
   const previousCode = props.activeDiagramCode
   nodeEditorPending.value = true
-  if (edit.mode === 'edit') emit('editNodeLabel', edit.nodeId, edit.label)
-  else emit('insertNode', edit.shape, edit.label, edit.afterNodeId, edit.relation)
+  emit('insertNode', edit.shape, edit.label, edit.afterNodeId, edit.relation)
 
   await nextTick()
   nodeEditorPending.value = false
@@ -769,7 +949,13 @@ async function openContextMenu(
 ) {
   const currentRevision = ++contextMenuRevision
   contextMenuInvoker = invoker
-  contextMenu.value = { x: clientX, y: clientY, nodeId, edge }
+  contextMenu.value = {
+    x: clientX,
+    y: clientY,
+    nodeId,
+    edge,
+    nodeIds: edge ? [] : nodeId ? [...selectedNodeIds.value] : [],
+  }
   await nextTick()
 
   if (currentRevision !== contextMenuRevision) return
@@ -813,6 +999,7 @@ function handlePreviewContextMenu(event: MouseEvent) {
   const editableEdge =
     getNearestEditableEdge(event.clientX, event.clientY) ?? getEditableEdge(event.target)
   if (editableEdge) {
+    clearNodeSelection()
     event.preventDefault()
     void openContextMenu(
       event.clientX,
@@ -828,6 +1015,11 @@ function handlePreviewContextMenu(event: MouseEvent) {
   const anyNode = event.target.closest('g.node, g.rough-node')
   if (anyNode && !editableNode) return
   if (!editableNode && !event.target.closest('.diagram-viewport')) return
+
+  selectNodeForContextMenu(
+    editableNode?.dataset.id ?? null,
+    Boolean(editableNode && (event.shiftKey || event.ctrlKey || event.metaKey)),
+  )
 
   event.preventDefault()
   void openContextMenu(
@@ -970,11 +1162,29 @@ function deleteContextNode() {
   openDeleteConfirmation(nodeId, label, suffix)
 }
 
+function deleteSelectedNodes() {
+  const ids = contextMenu.value?.nodeIds ?? []
+  if (ids.length < 2 || !canDeleteSelectedNodes.value) return
+
+  closeContextMenu()
+  openDeleteConfirmation(
+    '',
+    `已选 ${ids.length} 个节点`,
+    isMindmapDiagram.value ? '；选中父节点时会连同其整棵子树' : '及其相关连线',
+    ids,
+  )
+}
+
 function confirmDeleteNode() {
   const confirmation = deleteConfirmation.value
   if (!confirmation) return
   closeDeleteConfirmation()
-  emit('deleteNode', confirmation.nodeId)
+  if (confirmation.nodeIds) {
+    clearNodeSelection()
+    emit('deleteNodes', confirmation.nodeIds)
+  } else {
+    emit('deleteNode', confirmation.nodeId)
+  }
 }
 
 function deleteContextEdge() {
@@ -1075,10 +1285,16 @@ function prepareEditableNodes() {
       : '按 Enter 新建同级、按 Tab 新建下级，双击编辑文字'
     node.setAttribute(
       'aria-label',
-      `节点：${label.replace(/\s+/g, ' ') || nodeId}；${keyboardHint}，按 Shift+F10 打开菜单`,
+      `节点：${label.replace(/\s+/g, ' ') || nodeId}；${keyboardHint}，按 Shift/Ctrl/Cmd+点击多选，按 Cmd/Ctrl+退格删除选中节点，按 Shift+F10 打开菜单`,
     )
     editableNodeIds.push(nodeId)
   }
+
+  const editableNodeIdSet = new Set(editableNodeIds)
+  selectedNodeIds.value = new Set(
+    [...selectedNodeIds.value].filter((nodeId) => editableNodeIdSet.has(nodeId)),
+  )
+  syncSelectedNodeClasses()
 
   if (!mindmap) {
     prepareEditableEdges(editableNodeIds)
@@ -1343,6 +1559,23 @@ function handlePreviewKeydown(event: KeyboardEvent) {
   const stage = previewStage.value
   if (!stage) return
 
+  if (
+    (event.metaKey || event.ctrlKey) &&
+    !event.altKey &&
+    event.key === 'Backspace' &&
+    selectedNodeIds.value.size > 0 &&
+    isDiagramInteractionCurrent()
+  ) {
+    const nodeIds = [...selectedNodeIds.value]
+    event.preventDefault()
+    event.stopPropagation()
+    closeContextMenu()
+    clearNodeSelection()
+    if (nodeIds.length === 1) emit('deleteNode', nodeIds[0])
+    else emit('deleteNodes', nodeIds)
+    return
+  }
+
   if (event.key === 'Escape' && edgeDrag.value) {
     event.preventDefault()
     cancelEdgeDrag()
@@ -1353,6 +1586,7 @@ function handlePreviewKeydown(event: KeyboardEvent) {
     if (!canOpenDiagramContextMenu()) return
     const edge = getEditableEdge(event.target)
     if (edge) {
+      clearNodeSelection()
       event.preventDefault()
       const rect = edge.element.getBoundingClientRect()
       void openContextMenu(
@@ -1367,6 +1601,8 @@ function handlePreviewKeydown(event: KeyboardEvent) {
     const node = getEditableNode(event.target)
     const anyNode = event.target instanceof Element && event.target.closest('g.node, g.rough-node')
     if (anyNode && !node) return
+
+    selectNodeForContextMenu(node?.dataset.id ?? null)
 
     event.preventDefault()
     const rect = (node ?? stage).getBoundingClientRect()
@@ -1450,6 +1686,7 @@ watch(
   () => props.svgMarkup,
   async (nextSvg, previousSvg) => {
     closeContextMenu()
+    closeInlineNodeEditor(false)
     stopPreviewDrag()
     cancelEdgeDrag()
     closeDeleteConfirmation()
@@ -1465,20 +1702,33 @@ watch(
 
 watch(() => props.activeDiagramCode, () => {
   dismissPreviewTransientState()
+  closeInlineNodeEditor(false)
+  clearNodeSelection()
   if (isMindmapDiagram.value) connectionMode.value = false
 })
+
+function handleWindowResize() {
+  dismissPreviewTransientState()
+  syncInlineNodeEditorPosition()
+}
+
+function handleWindowBlur() {
+  dismissPreviewTransientState()
+  if (inlineEditingNode.value) void saveInlineNodeLabel()
+}
 
 onMounted(() => {
   document.addEventListener('fullscreenchange', syncFullscreenState)
   document.addEventListener('pointerdown', handleDocumentPointerDown, true)
   window.addEventListener('pointerup', handlePreviewPointerUp, true)
   window.addEventListener('pointercancel', handlePreviewPointerCancel, true)
-  window.addEventListener('resize', dismissPreviewTransientState)
-  window.addEventListener('blur', dismissPreviewTransientState)
+  window.addEventListener('resize', handleWindowResize)
+  window.addEventListener('blur', handleWindowBlur)
   prepareEditableNodes()
 })
 
 onBeforeUnmount(() => {
+  closeInlineNodeEditor(false)
   stopPreviewDrag()
   cancelEdgeDrag()
   closeDeleteConfirmation()
@@ -1488,8 +1738,8 @@ onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', handleDocumentPointerDown, true)
   window.removeEventListener('pointerup', handlePreviewPointerUp, true)
   window.removeEventListener('pointercancel', handlePreviewPointerCancel, true)
-  window.removeEventListener('resize', dismissPreviewTransientState)
-  window.removeEventListener('blur', dismissPreviewTransientState)
+  window.removeEventListener('resize', handleWindowResize)
+  window.removeEventListener('blur', handleWindowBlur)
   if (fallbackFullscreenActive.value) {
     document.body.style.overflow = previousBodyOverflow
     window.removeEventListener('keydown', handleFallbackFullscreenKeydown)
@@ -1724,6 +1974,23 @@ onBeforeUnmount(() => {
         <div ref="diagramElement" class="diagram" :style="diagramStyle" v-html="svgMarkup" />
       </div>
 
+      <textarea
+        v-if="inlineEditingNode"
+        ref="inlineNodeEditorInput"
+        v-model="inlineEditingNode.label"
+        class="inline-node-editor"
+        :style="inlineNodeEditorStyle"
+        aria-label="节点文字（内联编辑）"
+        maxlength="5000"
+        rows="1"
+        :disabled="inlineNodeEditorPending"
+        @keydown="handleInlineNodeEditorKeydown"
+        @blur="handleInlineNodeEditorBlur"
+        @pointerdown.stop
+        @click.stop
+        @dblclick.stop
+      />
+
       <svg
         v-if="edgeDragLine"
         class="edge-drag-overlay"
@@ -1777,10 +2044,58 @@ onBeforeUnmount(() => {
           connectionMode
             ? '连接模式：从起点拖到终点，箭头指向松开位置 · 回路会改变布局 · 右键删线或左侧撤销'
             : isMindmapDiagram
-              ? '脑图：Tab 立即新建子节点 · Enter 立即新建同级（根节点时新建子节点） · 双击编辑文字 · 右键管理层级 · 层级由缩进维护 · 拖拽平移'
-              : '流程图：Tab 新建下级 · Enter 新建同级 · 双击编辑文字 · 开启连接模式后拖线 · 右键节点/连线管理 · 捏合缩放 · 拖拽平移'
-        }}
+              ? '脑图：Tab 立即新建子节点 · Enter 立即新建同级（根节点时新建子节点） · 双击编辑文字 · Shift/Ctrl/Cmd+点击多选 · Cmd/Ctrl+退格批量删除 · 右键管理层级 · 层级由缩进维护 · 拖拽平移'
+              : '流程图：Tab 新建下级 · Enter 新建同级 · 双击编辑文字 · Shift/Ctrl/Cmd+点击多选 · Cmd/Ctrl+退格批量删除 · 开启连接模式后拖线 · 右键节点/连线管理 · 捏合缩放 · 拖拽平移'
+          }}
       </span>
+      <details class="shortcut-help">
+        <summary>⌨ 快捷键</summary>
+        <div class="shortcut-help__panel">
+          <p class="shortcut-help__title">画布快捷键</p>
+          <dl>
+            <div>
+              <dt>双击节点</dt>
+              <dd>在画布内编辑文字</dd>
+            </div>
+            <div>
+              <dt>Tab</dt>
+              <dd>创建下一级节点</dd>
+            </div>
+            <div>
+              <dt>Enter</dt>
+              <dd>创建同级节点（脑图根节点例外）</dd>
+            </div>
+            <div>
+              <dt>Shift/Ctrl/Cmd + 点击</dt>
+              <dd>多选或取消选择节点</dd>
+            </div>
+            <div>
+              <dt>Cmd/Ctrl + 退格</dt>
+              <dd>删除选中节点</dd>
+            </div>
+            <div>
+              <dt>右键 / Shift+F10</dt>
+              <dd>打开节点、连线或批量菜单</dd>
+            </div>
+            <div>
+              <dt>Esc</dt>
+              <dd>取消编辑、关闭菜单或取消连线</dd>
+            </div>
+            <div>
+              <dt>Cmd/Ctrl + Z</dt>
+              <dd>撤销；Cmd/Ctrl + Shift + Z 重做</dd>
+            </div>
+            <div>
+              <dt>方向键 / PageUp / PageDown</dt>
+              <dd>移动画布视图</dd>
+            </div>
+            <div>
+              <dt>Ctrl + 滚轮</dt>
+              <dd>围绕指针缩放画布</dd>
+            </div>
+          </dl>
+        </div>
+      </details>
     </footer>
 
     <div
@@ -1791,6 +2106,8 @@ onBeforeUnmount(() => {
       :aria-label="
         contextMenu.edge
           ? '连线操作'
+          : contextMenu.nodeIds.length > 1
+            ? '批量节点操作'
           : contextMenu.nodeId
             ? isMindmapDiagram
               ? '脑图节点操作'
@@ -1808,6 +2125,8 @@ onBeforeUnmount(() => {
         {{
           contextMenu.edge
             ? '连线操作'
+            : contextMenu.nodeIds.length > 1
+              ? `已选 ${contextMenu.nodeIds.length} 个节点`
             : contextMenu.nodeId
               ? isMindmapDiagram
                 ? '脑图节点操作'
@@ -1833,6 +2152,28 @@ onBeforeUnmount(() => {
             · 第 {{ (contextMenu.edge.occurrence ?? 0) + 1 }}/{{ contextMenu.edge.parallelCount }} 条同向连线
           </template>
           · 删除后可撤销
+        </p>
+      </template>
+      <template v-else-if="contextMenu.nodeIds.length > 1">
+        <button
+          class="diagram-context-menu__item diagram-context-menu__item--danger"
+          type="button"
+          role="menuitem"
+          :disabled="!canDeleteSelectedNodes"
+          :title="isMindmapDiagram && contextMenu.nodeIds.includes('node_0') ? '脑图根节点不能删除，请取消根节点选择' : undefined"
+          @click="deleteSelectedNodes"
+        >
+          <Trash2 :size="15" aria-hidden="true" />
+          删除选中节点（{{ contextMenu.nodeIds.length }}）
+        </button>
+        <p class="diagram-context-menu__hint">
+          {{
+            isMindmapDiagram && contextMenu.nodeIds.includes('node_0')
+              ? '选中集合包含脑图根节点，批量删除已禁用'
+              : isMindmapDiagram
+                ? '选中父节点时会连同整棵子树删除；删除后可撤销'
+                : '节点及相关连线会一次删除；删除后可撤销'
+          }}
         </p>
       </template>
       <template v-else>
@@ -1941,17 +2282,10 @@ onBeforeUnmount(() => {
         <div>
           <h3 id="node-edit-title">
             {{
-              editingNode.mode === 'edit'
-                ? '编辑节点文字'
-                : editingNode.mode === 'insert'
-                  ? '插入新节点'
-                  : '查看节点信息'
+              editingNode.mode === 'insert' ? '插入新节点' : '查看节点信息'
             }}
           </h3>
-          <p v-if="editingNode.mode === 'edit'">
-            {{ isMindmapDiagram ? '脑图节点' : '节点' }} {{ editingNode.nodeId }} · 换行会自动转换为 Mermaid 的 &lt;br/&gt;
-          </p>
-          <p v-else-if="editingNode.mode === 'insert'">
+          <p v-if="editingNode.mode === 'insert'">
             {{
               isMindmapDiagram
                 ? editingNode.relation === 'sibling'
@@ -1964,7 +2298,7 @@ onBeforeUnmount(() => {
             · 位置由 Mermaid 自动排版
           </p>
           <p v-else>
-            {{ isMindmapDiagram ? '脑图节点' : '节点' }} {{ editingNode.nodeId }} · 只读查看当前节点文字；如需修改，请点击编辑节点文字。
+            {{ isMindmapDiagram ? '脑图节点' : '节点' }} {{ editingNode.nodeId }} · 只读查看当前节点文字；如需修改，将进入画布内编辑。
           </p>
         </div>
         <textarea
@@ -2003,8 +2337,6 @@ onBeforeUnmount(() => {
             {{
               nodeEditorPending
                 ? '正在应用…'
-                : editingNode.mode === 'edit'
-                ? '保存并重绘'
                 : isMindmapDiagram
                   ? editingNode.relation === 'sibling'
                     ? '插入同级节点并重绘'
@@ -2448,7 +2780,15 @@ onBeforeUnmount(() => {
 
 .diagram :deep(g.node.is-node-editable),
 .diagram :deep(g.rough-node.is-node-editable) {
-  cursor: text;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.diagram :deep(g.node.is-node-editable text),
+.diagram :deep(g.rough-node.is-node-editable text) {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .preview-stage.is-connect-mode .diagram :deep(g.node.is-node-editable),
@@ -2487,6 +2827,55 @@ onBeforeUnmount(() => {
 .diagram :deep(g.rough-node.is-node-editable:focus-visible) {
   outline: 3px solid rgb(99 102 241 / 58%);
   outline-offset: 4px;
+}
+
+.diagram :deep(g.node.is-node-selected),
+.diagram :deep(g.rough-node.is-node-selected) {
+  filter:
+    drop-shadow(0 0 2px #fff)
+    drop-shadow(0 0 8px rgb(67 56 202 / 95%));
+}
+
+.diagram :deep(g.node.is-node-selected :is(rect, polygon, circle, ellipse, path)),
+.diagram :deep(g.rough-node.is-node-selected :is(rect, polygon, circle, ellipse, path)) {
+  stroke: #4338ca !important;
+  stroke-width: 4px !important;
+}
+
+.diagram :deep(g.node.is-inline-editing text),
+.diagram :deep(g.node.is-inline-editing foreignObject),
+.diagram :deep(g.rough-node.is-inline-editing text),
+.diagram :deep(g.rough-node.is-inline-editing foreignObject) {
+  visibility: hidden;
+}
+
+.inline-node-editor {
+  position: absolute;
+  z-index: 4;
+  box-sizing: border-box;
+  min-width: 80px;
+  min-height: 32px;
+  margin: 0;
+  padding: 5px 8px;
+  resize: none;
+  overflow: auto;
+  color: var(--text-primary);
+  border: 2px solid #6366f1;
+  border-radius: 7px;
+  outline: none;
+  background: #fff;
+  box-shadow: 0 5px 18px rgb(56 55 160 / 22%), 0 0 0 3px rgb(99 102 241 / 12%);
+  font: 600 13px/1.35 var(--font-sans);
+  text-align: center;
+}
+
+.inline-node-editor:focus {
+  border-color: #4f46e5;
+}
+
+.inline-node-editor:disabled {
+  cursor: progress;
+  opacity: 0.8;
 }
 
 .diagram :deep(path.edge-hit-area) {
@@ -2807,6 +3196,98 @@ onBeforeUnmount(() => {
 .preview-footer span {
   display: inline-flex;
   align-items: center;
+}
+
+.shortcut-help {
+  position: relative;
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+
+.shortcut-help summary {
+  min-height: 24px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  outline: none;
+  background: var(--surface);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  list-style: none;
+}
+
+.shortcut-help summary::-webkit-details-marker {
+  display: none;
+}
+
+.shortcut-help summary::after {
+  display: inline-block;
+  margin-left: 5px;
+  content: '⌄';
+  color: var(--text-faint);
+  transition: transform 150ms ease;
+}
+
+.shortcut-help[open] summary::after {
+  transform: rotate(180deg);
+}
+
+.shortcut-help summary:hover,
+.shortcut-help summary:focus-visible {
+  color: var(--primary-strong);
+  border-color: #aaa5ef;
+  background: #f7f6ff;
+}
+
+.shortcut-help__panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 6;
+  width: min(390px, calc(100vw - 28px));
+  max-height: min(510px, 70vh);
+  padding: 10px 12px;
+  overflow-y: auto;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: rgb(255 255 255 / 98%);
+  box-shadow: 0 12px 30px rgb(25 31 58 / 18%);
+  font-size: 11px;
+}
+
+.shortcut-help__title {
+  margin: 0 0 7px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.shortcut-help__panel dl {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.shortcut-help__panel dl > div {
+  display: grid;
+  grid-template-columns: minmax(132px, auto) 1fr;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.shortcut-help__panel dt {
+  color: var(--primary-strong);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.shortcut-help__panel dd {
+  margin: 0;
+  color: var(--text-faint);
+  line-height: 1.35;
 }
 
 .sr-only {

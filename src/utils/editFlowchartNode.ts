@@ -288,6 +288,35 @@ export function deleteFlowchartNode(source: string, nodeId: string): string | nu
   return found ? nextSource : null
 }
 
+/**
+ * Deletes several flowchart nodes as one source transformation.
+ *
+ * Node ids remain stable while unrelated nodes are removed, so the existing
+ * single-node parser can be reused without changing the edge-cleanup rules.
+ */
+export function deleteFlowchartNodes(source: string, nodeIds: string[]): string | null {
+  const uniqueNodeIds = [...new Set(nodeIds)]
+  if (
+    !uniqueNodeIds.length ||
+    !isFlowchartSource(source) ||
+    uniqueNodeIds.some(
+      (nodeId) =>
+        !isEditableFlowchartNodeId(nodeId) ||
+        getFlowchartNodeLabel(source, nodeId) === null,
+    )
+  ) {
+    return null
+  }
+
+  let nextSource = source
+  for (const nodeId of uniqueNodeIds) {
+    const deleted = deleteFlowchartNode(nextSource, nodeId)
+    if (deleted === null) return null
+    nextSource = deleted
+  }
+  return nextSource
+}
+
 export function deleteFlowchartEdge(
   source: string,
   fromNodeId: string,

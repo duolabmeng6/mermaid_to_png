@@ -310,6 +310,52 @@ export function deleteMindmapNode(
   return nextSource
 }
 
+/**
+ * Deletes several mindmap nodes in one source transformation.
+ *
+ * Selecting an ancestor already covers its descendants, so descendants are
+ * removed from the work list. The remaining original indices are processed
+ * from right to left to keep earlier indices stable while subtrees shrink.
+ */
+export function deleteMindmapNodes(
+  source: string,
+  nodeIndices: MindmapNodeIdentifier[],
+): string | null {
+  if (!isMindmapSource(source) || !nodeIndices.length) return null
+
+  const structure = getMindmapNodeStructure(source)
+  const normalizedIndices = [...new Set(
+    nodeIndices.map((nodeIndex) => normalizeMindmapNodeIndex(nodeIndex)),
+  )]
+  if (
+    normalizedIndices.some(
+      (nodeIndex): nodeIndex is null =>
+        nodeIndex === null || nodeIndex <= 0 || !structure[nodeIndex],
+    )
+  ) {
+    return null
+  }
+
+  const rootIndices = normalizedIndices.filter(
+    (nodeIndex): nodeIndex is number =>
+      nodeIndex !== null &&
+      !normalizedIndices.some(
+        (candidate) =>
+          candidate !== null &&
+          candidate < nodeIndex &&
+          candidate + structure[candidate].subtreeSize > nodeIndex,
+      ),
+  )
+
+  let nextSource = source
+  for (const nodeIndex of rootIndices.sort((left, right) => right - left)) {
+    const deleted = deleteMindmapNode(nextSource, nodeIndex)
+    if (deleted === null) return null
+    nextSource = deleted
+  }
+  return nextSource
+}
+
 function findMindmapNodeRanges(source: string): MindmapNodeRange[] {
   if (!isMindmapSource(source)) return []
 

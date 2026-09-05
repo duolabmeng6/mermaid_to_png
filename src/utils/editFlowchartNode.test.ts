@@ -5,6 +5,7 @@ import {
   getFlowchartNodeIdFromDomId,
   getFlowchartEdgeFromDomId,
   deleteFlowchartNode,
+  deleteFlowchartNodes,
   deleteFlowchartEdge,
   insertFlowchartNode,
   insertFlowchartSiblingNode,
@@ -452,6 +453,21 @@ describe('流程图节点文字编辑', () => {
         '  A[第二张] --> B\r\n  A --> newNode1("新增")',
       ),
     )
+  })
+
+  it('一次删除多个节点并清理各自连线', () => {
+    expect(
+      deleteFlowchartNodes(
+        [
+          'flowchart TD',
+          '  A[起点] --> B[分支一]',
+          '  A --> C[分支二]',
+          '  B --> D[终点]',
+        ].join('\n'),
+        ['B', 'C'],
+      ),
+    ).toBe('flowchart TD\n  A[起点]\n  A\n  D[终点]')
+    expect(deleteFlowchartNodes('flowchart TD\n  A --> B', ['A', '不存在'])).toBeNull()
   })
 
   it('纯 Mermaid 插入节点保留 CRLF 与 CR 换行', () => {
