@@ -2,6 +2,11 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { BookOpen, FolderGit2, Redo2, ShieldCheck, Undo2, Workflow } from '@lucide/vue'
 import MermaidEditor from './components/MermaidEditor.vue'
+import WorkDocumentBar from './components/WorkDocumentBar.vue'
+import { isComposingKey } from './utils/editorInteraction'
+import { updateFlowchartNodeAnnotation, type NodeAnnotation } from './utils/nodeAnnotation'
+import { updateNodeAppearance, type NodeAppearance } from './utils/nodeAppearance'
+import type { DocumentContent, WorkDocument } from './utils/workDocuments'
 import MermaidPreview from './components/MermaidPreview.vue'
 import MermaidThumbnailList from './components/MermaidThumbnailList.vue'
 import { defaultDiagramCode, diagramExamples } from './data/examples'
@@ -40,10 +45,17 @@ import {
   insertMindmapSibling,
   isMindmapSource,
   moveMindmapNode as moveMindmapNodeSource,
+  reorderMindmapNode,
+  shiftMindmapNode,
+  toggleMindmapBranch,
+  expandAllMindmapBranches,
+  updateMindmapNodeAnnotation,
   updateMindmapNodeLabel,
   type MindmapNodeShape,
 } from './utils/editMindmapNode'
 import type { DiagramLayout } from './utils/applyDiagramLayout'
+
+import { readDiagramAppearance, type NodeSizing } from './utils/diagramAppearance'
 
 const CODE_STORAGE_KEY = 'mermaid-image-studio:code'
 const SETTINGS_STORAGE_KEY = 'mermaid-image-studio:settings'
@@ -51,6 +63,8 @@ const SETTINGS_STORAGE_KEY = 'mermaid-image-studio:settings'
 const MAX_BATCH_DIAGRAMS = 50
 const MAX_BATCH_PNG_BYTES = 200 * 1024 * 1024
 
+const historyFocusTarget = ref<'editor' | 'preview'>('preview')
+const documentId = ref('legacy')
 const code = ref(readStoredCode())
 const storedSettings = readStoredSettings()
 const theme = ref<MermaidTheme>(storedSettings.theme)
@@ -66,6 +80,7 @@ const exportingType = ref<'png' | 'svg' | 'zip' | ''>('')
 const activeDiagramIndex = ref(0)
 const batchProgress = ref({ current: 0, total: 0 })
 const toast = ref<{ message: string; type: 'success' | 'error' } | null>(null)
+const mermaidPreview = ref<InstanceType<typeof MermaidPreview> | null>(null)
 const mermaidEditor = ref<InstanceType<typeof MermaidEditor> | null>(null)
 
 const diagrams = computed(() => extractMermaidBlocks(code.value))
@@ -99,14 +114,6 @@ const canRedo = computed(() => Boolean(mermaidEditor.value?.canRedo))
 
 let toastTimer: number | undefined
 
-watch(code, (value) => {
-  try {
-    localStorage.setItem(CODE_STORAGE_KEY, value)
-    draftSaved.value = true
-  } catch {
-    draftSaved.value = false
-  }
-})
 
 watch(
   () => diagrams.value.length,
@@ -115,23 +122,22 @@ watch(
   },
 )
 
-watch([theme, layout, nodeSizing, background, pngScale, pngPadding], () => {
-  try {
-    localStorage.setItem(
-      SETTINGS_STORAGE_KEY,
-      JSON.stringify({
-        theme: theme.value,
-        layout: layout.value,
-        nodeSizing: nodeSizing.value,
-        background: background.value,
-        pngScale: pngScale.value,
-        pngPadding: pngPadding.value,
-      }),
-    )
-  } catch {
-    // 设置保存失败不影响核心功能。
-  }
-})
+const documentContent = computed<DocumentContent>(() => ({
+  code: code.value,
+  settings: { theme: theme.value, layout: layout.value, nodeSizing: nodeSizing.value,
+    background: background.value, pngScale: pngScale.value, pngPadding: pngPadding.value },
+}))
+function loadDocument(document: WorkDocument) {
+  documentId.value = document.id
+  code.value = document.code
+  theme.value = document.settings.theme
+  layout.value = document.settings.layout
+  nodeSizing.value = { ...document.settings.nodeSizing }
+  background.value = document.settings.background
+  pngScale.value = document.settings.pngScale
+  pngPadding.value = document.settings.pngPadding
+  activeDiagramIndex.value = 0
+}
 
 function resetCode() {
   code.value = defaultDiagramCode
@@ -143,21 +149,30 @@ function clearCode() {
   showToast('编辑区已清空', 'success')
 }
 
+function rememberEditingSurface(event: FocusEvent) {
+  if (!(event.target instanceof Element)) return
+  if (event.target.closest('.editor-panel')) historyFocusTarget.value = 'editor'
+  else if (event.target.closest('.preview-panel')) historyFocusTarget.value = 'preview'
+}
+
 function undoCode(): boolean {
   if (!mermaidEditor.value?.canUndo) return false
-  mermaidEditor.value.undo()
+  if (historyFocusTarget.value === 'preview') mermaidPreview.value?.prepareHistoryNavigation()
+  mermaidEditor.value.undo(historyFocusTarget.value === 'editor')
   showToast('已撤回上一步操作', 'success')
   return true
 }
 
 function redoCode(): boolean {
   if (!mermaidEditor.value?.canRedo) return false
-  mermaidEditor.value.redo()
+  if (historyFocusTarget.value === 'preview') mermaidPreview.value?.prepareHistoryNavigation()
+  mermaidEditor.value.redo(historyFocusTarget.value === 'editor')
   showToast('已恢复上一步操作', 'success')
   return true
 }
 
 function handleGlobalHistoryShortcut(event: KeyboardEvent) {
+  if (isComposingKey(event)) return
   if (!(event.metaKey || event.ctrlKey) || event.altKey) return
   const target = event.target
   if (
@@ -246,7 +261,7 @@ async function exportAllAsZip() {
       batchProgress.value.current = index + 1
 
       try {
-        const rendered = await renderMermaidDiagram(diagram.code, selectedTheme, selectedLayout, selectedNodeSizing)
+        const rendered = await renderMermaidDiagram(diagram.code, selectedTheme, selectedLayout, selectedNodeSizing, { priority: 'export' })
         const { blob } = await createPngBlob(
           rendered.svg,
           selectedScale,
@@ -307,6 +322,30 @@ async function exportAllAsZip() {
     exportingType.value = ''
     batchProgress.value = { current: 0, total: 0 }
   }
+}
+
+function annotateNode(nodeId: string, annotation: NodeAnnotation) {
+  const diagram = activeDiagram.value
+  if (!diagram) return
+  try {
+    const source = isMindmapSource(diagram.code)
+      ? updateMindmapNodeAnnotation(diagram.code, nodeId, annotation)
+      : updateFlowchartNodeAnnotation(diagram.code, nodeId, annotation)
+    const next = source === null ? null : replaceMermaidBlockCode(code.value, diagram, source)
+    if (next === null) { showToast('无法定位节点，请重新打开备注。', 'error'); return }
+    code.value = next
+    showToast('备注已保存，可撤销。', 'success')
+  } catch (error) { showToast(error instanceof Error ? error.message : '备注保存失败。', 'error') }
+}
+
+function styleNodes(nodeIds: string[], appearance: NodeAppearance | null) {
+  const diagram = activeDiagram.value
+  if (!diagram) return
+  const updated = updateNodeAppearance(diagram.code, nodeIds, appearance)
+  const next = updated === null ? null : replaceMermaidBlockCode(code.value, diagram, updated)
+  if (next === null) { showToast('无法修改这些节点，请重新选择后再试。', 'error'); return }
+  code.value = next
+  showToast(appearance ? '节点外观已更新，可撤销。' : '已移除节点自定义外观，可撤销。', 'success')
 }
 
 function editNodeLabel(nodeId: string, nextLabel: string) {
@@ -553,15 +592,40 @@ function connectNodes(fromNodeId: string, toNodeId: string) {
   )
 }
 
+function expandBranches() {
+  const diagram = activeDiagram.value
+  if (!diagram) return
+  const next = expandAllMindmapBranches(diagram.code)
+  if (next === null) { showToast('展开内容过大或存在异常，请逐个展开分支。', 'error'); return }
+  const document = replaceMermaidBlockCode(code.value, diagram, next)
+  if (document !== null) code.value = document
+}
+
+function toggleBranch(nodeId: string) {
+  const diagram = activeDiagram.value
+  if (!diagram) return
+  const next = toggleMindmapBranch(diagram.code, nodeId)
+  if (next === null) { showToast('这个节点暂时无法折叠或展开。', 'error'); return }
+  const document = replaceMermaidBlockCode(code.value, diagram, next)
+  if (document !== null) code.value = document
+}
+
+function shiftNode(nodeId: string, direction: -1 | 1) {
+  const diagram = activeDiagram.value
+  if (!diagram) return
+  const next = shiftMindmapNode(diagram.code, nodeId, direction)
+  if (next === null) return
+  const document = replaceMermaidBlockCode(code.value, diagram, next)
+  if (document !== null) code.value = document
+}
+
 function reorderNode(nodeId: string, targetNodeId: string) {
   const diagram = activeDiagram.value
-  if (!diagram || !isFlowchartSource(diagram.code)) return
+  if (!diagram) return
 
-  const nextDiagramCode = reorderFlowchartNode(
-    diagram.code,
-    nodeId,
-    targetNodeId,
-  )
+  const nextDiagramCode = isMindmapSource(diagram.code)
+    ? reorderMindmapNode(diagram.code, nodeId, targetNodeId)
+    : reorderFlowchartNode(diagram.code, nodeId, targetNodeId)
   if (nextDiagramCode === null) {
     showToast('暂时无法安全调整这个节点，请通过左侧源码排序。', 'error')
     return
@@ -620,7 +684,7 @@ function isLocalStorageAvailable(): boolean {
 function readStoredSettings(): {
   theme: MermaidTheme
   layout: DiagramLayout
-  nodeSizing: { width: number | null; padding: number | null }
+  nodeSizing: NodeSizing
   background: ExportBackground
   pngScale: PngScale
   pngPadding: PngPadding
@@ -628,7 +692,7 @@ function readStoredSettings(): {
   const fallback = {
     theme: 'default' as const,
     layout: 'source' as const,
-    nodeSizing: { width: null, padding: null },
+    nodeSizing: readDiagramAppearance(null),
     background: 'theme' as const,
     pngScale: 3 as const,
     pngPadding: 32 as const,
@@ -644,11 +708,8 @@ function readStoredSettings(): {
     const validScales: PngScale[] = [1, 2, 3, 4]
     const validPaddings: PngPadding[] = [0, 16, 32, 48, 64]
 
-    const sizing = value.nodeSizing as { width?: unknown; padding?: unknown } | undefined
-    const validSize = (size: unknown, min: number, max: number) =>
-      typeof size === 'number' && Number.isFinite(size) && size >= min && size <= max ? size : null
     return {
-      nodeSizing: { width: validSize(sizing?.width, 40, 2000), padding: validSize(sizing?.padding, 0, 100) },
+      nodeSizing: readDiagramAppearance(value.nodeSizing),
       theme: isMermaidTheme(value.theme) ? value.theme : fallback.theme,
       layout: validLayouts.includes(value.layout as DiagramLayout)
         ? (value.layout as DiagramLayout)
@@ -677,7 +738,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" @focusin="rememberEditingSurface">
     <header class="app-header">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true"><Workflow :size="22" /></span>
@@ -742,6 +803,9 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
+    <WorkDocumentBar :content="documentContent" :disabled="isExporting"
+      @load="loadDocument" @saved="draftSaved = $event" />
+
     <main class="workspace">
       <div
         class="workspace-grid"
@@ -751,6 +815,7 @@ onBeforeUnmount(() => {
         }"
       >
         <MermaidEditor
+          :key="`editor-${documentId}`"
           ref="mermaidEditor"
           v-model="code"
           v-model:collapsed="editorCollapsed"
@@ -776,6 +841,8 @@ onBeforeUnmount(() => {
         />
 
         <MermaidPreview
+          ref="mermaidPreview"
+          :key="`preview-${documentId}`"
           v-model:theme="theme"
           v-model:layout="layout"
           v-model:node-sizing="nodeSizing"
@@ -796,12 +863,17 @@ onBeforeUnmount(() => {
           @export-png="exportAsPng"
           @export-zip="exportAllAsZip"
           @edit-node-label="editNodeLabel"
+          @style-nodes="styleNodes"
+          @annotate-node="annotateNode"
           @insert-node="insertNode"
           @delete-node="deleteNode"
           @delete-nodes="deleteNodes"
           @delete-edge="deleteEdge"
           @connect-nodes="connectNodes"
           @reorder-node="reorderNode"
+          @shift-node="shiftNode"
+          @toggle-branch="toggleBranch"
+          @expand-branches="expandBranches"
           @move-node="moveNode"
         />
       </div>

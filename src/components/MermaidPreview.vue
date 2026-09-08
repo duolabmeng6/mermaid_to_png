@@ -47,6 +47,8 @@ import {
   getMindmapNodeIndexFromDomId,
   getMindmapNodeLabel,
   getMindmapNodeStructure,
+  getMindmapFoldedCounts,
+  readMindmapNodeAnnotation,
   isMindmapSource,
 } from '../utils/editMindmapNode'
 import {
@@ -55,7 +57,16 @@ import {
   getZoomAnchor,
 } from '../utils/previewNavigation'
 
-import type { NodeSizing } from '../composables/useMermaidRenderer'
+import type { NodeSizing } from '../utils/diagramAppearance'
+import DiagramAppearancePanel from './DiagramAppearancePanel.vue'
+import PngExportPreview from './PngExportPreview.vue'
+import NodeAppearanceDialog from './NodeAppearanceDialog.vue'
+import MindmapOutline from './MindmapOutline.vue'
+import NodeAnnotationDialog from './NodeAnnotationDialog.vue'
+import { readFlowchartNodeAnnotation, type NodeAnnotation } from '../utils/nodeAnnotation'
+import { isComposingKey, resolveHistoryNode, type HistoryNodeAnchor } from '../utils/editorInteraction'
+import type { NodeAppearance } from '../utils/nodeAppearance'
+import { calculateCanvasSize } from '../utils/exportDiagram'
 
 type PreviewZoom = 'fit' | number
 
@@ -164,6 +175,8 @@ const emit = defineEmits<{
   exportPng: []
   exportZip: []
   editNodeLabel: [nodeId: string, label: string]
+  styleNodes: [nodeIds: string[], appearance: NodeAppearance | null]
+  annotateNode: [nodeId: string, annotation: NodeAnnotation]
   insertNode: [
     shape: FlowchartNodeShape,
     label: string,
@@ -175,6 +188,9 @@ const emit = defineEmits<{
   deleteEdge: [fromNodeId: string, toNodeId: string, occurrence: number]
   connectNodes: [fromNodeId: string, toNodeId: string]
   reorderNode: [nodeId: string, targetNodeId: string]
+  shiftNode: [nodeId: string, direction: -1 | 1]
+  toggleBranch: [nodeId: string]
+  expandBranches: []
   moveNode: [nodeId: string, newParentNodeId: string]
 }>()
 
@@ -182,6 +198,8 @@ const previewPanel = ref<HTMLElement | null>(null)
 const previewStage = ref<HTMLElement | null>(null)
 const diagramElement = ref<HTMLElement | null>(null)
 const fullscreenButton = ref<HTMLButtonElement | null>(null)
+const nodeAnnotationDialog = ref<InstanceType<typeof NodeAnnotationDialog> | null>(null)
+const nodeAppearanceDialog = ref<InstanceType<typeof NodeAppearanceDialog> | null>(null)
 const nodeEditorDialog = ref<HTMLDialogElement | null>(null)
 const nodeEditorInput = ref<HTMLTextAreaElement | null>(null)
 const deleteConfirmationDialog = ref<HTMLDialogElement | null>(null)
@@ -229,6 +247,8 @@ let edgeDropTarget: SVGGElement | null = null
 let sortDropTarget: SVGGElement | null = null
 let suppressNextSortClick = false
 let preparedDiagramCode = ''
+let historyNodeAnchor: HistoryNodeAnchor | null = null
+let historyFocusRequested = false
 let pendingNodeFocusId: string | null = null
 let pendingNodeFocusFallbackId: string | null = null
 let pendingInlineEditNodeId: string | null = null
@@ -240,6 +260,60 @@ const themeGroups = (Object.keys(themeGroupLabels) as Array<keyof typeof themeGr
     themes: mermaidThemePresets.filter((preset) => preset.group === group),
   }),
 )
+
+const appearancePanelOpen = ref(false)
+const outlineOpen = ref(false)
+const nodeSearch = ref('')
+const searchableNodes = ref<Array<{ id: string; label: string }>>([])
+const searchIndex = ref(-1)
+const searchMatches = computed(() => {
+  const query = nodeSearch.value.trim().toLocaleLowerCase()
+  return query ? searchableNodes.value.filter(node => node.label.toLocaleLowerCase().includes(query)) : []
+})
+watch([nodeSearch, searchableNodes], () => { searchIndex.value = -1 })
+function prepareHistoryNavigation() {
+  const nodeId = [...selectedNodeIds.value][0] ?? getEditableNode(document.activeElement)?.dataset.id
+  const node = searchableNodes.value.find(item => item.id === nodeId)
+  historyNodeAnchor = node ? { ...node, mindmap: isMindmapDiagram.value } : null
+  historyFocusRequested = true
+  rememberPreviewPosition()
+}
+defineExpose({ prepareHistoryNavigation })
+
+function handleSearchKeydown(event: KeyboardEvent) {
+  if (isComposingKey(event)) return
+  if (event.key === 'Enter') { event.preventDefault(); locateSearchResult(event.shiftKey ? -1 : 1) }
+  if (event.key === 'Escape') nodeSearch.value = ''
+}
+function handleNodeDialogShortcut(event: KeyboardEvent) {
+  if (isComposingKey(event)) return
+  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void saveNodeLabel() }
+}
+
+function locateOutlineNode(id: string) {
+  if (!isDiagramInteractionCurrent()) return
+  const node = findEditableNodeById(id)
+  if (!node) return
+  setNodeSelection(id)
+  node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'auto' })
+  rememberPreviewPosition()
+}
+function toggleOutlineBranch(id: string) {
+  if (isDiagramInteractionCurrent()) emit('toggleBranch', id)
+}
+
+function locateSearchResult(direction: number) {
+  if (!searchMatches.value.length || !isDiagramInteractionCurrent()) return
+  searchIndex.value = searchIndex.value < 0
+    ? direction > 0 ? 0 : searchMatches.value.length - 1
+    : (searchIndex.value + direction + searchMatches.value.length) % searchMatches.value.length
+  const result = searchMatches.value[searchIndex.value]
+  const node = findEditableNodeById(result.id)
+  if (!node) return
+  setNodeSelection(result.id)
+  node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'auto' })
+  rememberPreviewPosition()
+}
 
 const currentThemePreset = computed(() => getThemePreset(props.theme))
 const showDarkBackgroundWarning = computed(
@@ -285,12 +359,18 @@ const canUseConnectionMode = computed(
   () => Boolean(props.svgMarkup) && !props.isRendering && !props.errorMessage && isFlowchartSource(props.activeDiagramCode),
 )
 const canUseSortMode = computed(
-  () => Boolean(props.svgMarkup) && !props.isRendering && !props.errorMessage && isFlowchartSource(props.activeDiagramCode),
+  () => Boolean(props.svgMarkup) && !props.isRendering && !props.errorMessage && (isMindmapDiagram.value || isFlowchartSource(props.activeDiagramCode)),
 )
 
 const baseSizeLabel = computed(() => {
   if (!props.dimensions) return '等待预览'
   return `${Math.ceil(props.dimensions.width)} × ${Math.ceil(props.dimensions.height)}`
+})
+
+const pngSizeError = computed(() => {
+  if (!props.dimensions) return ''
+  try { calculateCanvasSize(props.dimensions, props.pngScale, props.pngPadding); return '' }
+  catch (error) { return error instanceof Error ? error.message : '导出尺寸超出限制。' }
 })
 
 const outputSizeLabel = computed(() => {
@@ -346,12 +426,6 @@ const inlineNodeEditorStyle = computed(() => {
 
 function updateTheme(event: Event) {
   emit('update:theme', (event.target as HTMLSelectElement).value as MermaidTheme)
-}
-
-function updateNodeSizing(key: 'width' | 'padding', event: Event) {
-  const input = event.target as HTMLInputElement
-  if (!input.checkValidity()) { input.reportValidity(); return }
-  emit('update:nodeSizing', { ...props.nodeSizing, [key]: input.value === '' ? null : Number(input.value) })
 }
 
 function updateLayout(event: Event) {
@@ -831,7 +905,14 @@ function updateSortDrag(event: PointerEvent): boolean {
 
   const hovered = document.elementFromPoint(event.clientX, event.clientY)
   const hoveredNode = getEditableNode(hovered)
-  const targetNode = hoveredNode?.dataset.id === drag.sourceNodeId ? null : hoveredNode
+  let targetNode = hoveredNode?.dataset.id === drag.sourceNodeId ? null : hoveredNode
+  if (isMindmapDiagram.value && targetNode) {
+    const sourceIndex = getMindmapNodeIndexFromDomId(drag.sourceNodeId)
+    const targetIndex = getMindmapNodeIndexFromDomId(targetNode.dataset.id ?? '')
+    const structure = mindmapNodeOptions.value
+    if (sourceIndex === null || targetIndex === null || sourceIndex === 0 || targetIndex === 0 ||
+        structure[sourceIndex]?.parentIndex !== structure[targetIndex]?.parentIndex) targetNode = null
+  }
   updateSortDropTarget(targetNode)
   drag.targetNode = targetNode
   drag.targetNodeId = targetNode?.dataset.id ?? null
@@ -871,7 +952,18 @@ function finishSortDrag(event: PointerEvent) {
     }, 0)
   }
   cancelSortDrag(event)
-  if (shouldReorder && targetNodeId) emit('reorderNode', sourceNodeId, targetNodeId)
+  if (shouldReorder && targetNodeId) {
+    if (isMindmapDiagram.value) {
+      const from = getMindmapNodeIndexFromDomId(sourceNodeId)
+      const to = getMindmapNodeIndexFromDomId(targetNodeId)
+      if (from !== null && to !== null) {
+        const size = mindmapNodeOptions.value[from]?.subtreeSize ?? 1
+        setPendingNodeFocus(`node_${to > from ? to - size : to}`)
+        clearNodeSelection()
+      }
+    } else setPendingNodeFocus(sourceNodeId)
+    emit('reorderNode', sourceNodeId, targetNodeId)
+  }
 }
 
 function handlePreviewPointerUp(event: PointerEvent) {
@@ -951,7 +1043,7 @@ function handleInlineNodeEditorBlur() {
 
 function handleInlineNodeEditorKeydown(event: KeyboardEvent) {
   event.stopPropagation()
-  if (event.isComposing) return
+  if (isComposingKey(event)) return
 
   if (event.key === 'Escape') {
     event.preventDefault()
@@ -993,6 +1085,65 @@ async function saveInlineNodeLabel() {
   } else {
     inlineNodeEditorInput.value?.focus()
   }
+}
+
+const foldedBranches = computed(() => isMindmapDiagram.value ? getMindmapFoldedCounts(props.activeDiagramCode) : new Map<number, number>())
+const contextFoldedCount = computed(() => {
+  const id = contextMenu.value?.nodeId
+  const index = id ? getMindmapNodeIndexFromDomId(id) : null
+  return index !== null ? foldedBranches.value.get(index) ?? 0 : 0
+})
+const canFoldContextNode = computed(() => {
+  const index = getMindmapNodeIndexFromDomId(contextMenu.value?.nodeId ?? '')
+  return index !== null && (contextFoldedCount.value > 0 || (mindmapNodeOptions.value[index]?.subtreeSize ?? 0) > 1)
+})
+function toggleContextBranch() {
+  const id = contextMenu.value?.nodeId
+  if (!id || !canFoldContextNode.value) return
+  setPendingNodeFocus(id)
+  closeContextMenu()
+  clearNodeSelection()
+  emit('toggleBranch', id)
+}
+
+function canShiftMindmapNode(direction: -1 | 1) {
+  const index = getMindmapNodeIndexFromDomId(contextMenu.value?.nodeId ?? '')
+  if (index === null || index <= 0) return false
+  const structure = mindmapNodeOptions.value
+  if (!structure[index]) return false
+  const siblings = structure.filter(item => item.parentIndex === structure[index].parentIndex)
+  const position = siblings.findIndex(item => item.index === index)
+  return Boolean(siblings[position + direction])
+}
+function shiftContextNode(direction: -1 | 1) {
+  const nodeId = contextMenu.value?.nodeId
+  if (!nodeId || !canShiftMindmapNode(direction)) return
+  const index = getMindmapNodeIndexFromDomId(nodeId)!
+  const structure = mindmapNodeOptions.value
+  const siblings = structure.filter(item => item.parentIndex === structure[index].parentIndex)
+  const neighbor = siblings[siblings.findIndex(item => item.index === index) + direction]
+  setPendingNodeFocus(`node_${direction === -1 ? neighbor.index : index + neighbor.subtreeSize}`)
+  closeContextMenu()
+  clearNodeSelection()
+  emit('shiftNode', nodeId, direction)
+}
+
+function openNodeAnnotation() {
+  const id = contextMenu.value?.nodeId
+  if (!id || !isDiagramInteractionCurrent()) return
+  const label = isMindmapDiagram.value ? getMindmapLabel(props.activeDiagramCode, id) : getFlowchartNodeLabel(props.activeDiagramCode, id)
+  const value = isMindmapDiagram.value ? readMindmapNodeAnnotation(props.activeDiagramCode, id) : readFlowchartNodeAnnotation(props.activeDiagramCode, id)
+  setPendingNodeFocus(id)
+  closeContextMenu()
+  nodeAnnotationDialog.value?.open(id, label ?? id, value)
+}
+
+function openNodeAppearance() {
+  const ids = contextMenu.value?.nodeIds ?? []
+  if (!ids.length || isMindmapDiagram.value || !isDiagramInteractionCurrent()) return
+  setPendingNodeFocus(ids[0])
+  closeContextMenu()
+  nodeAppearanceDialog.value?.open(ids)
 }
 
 function openNodeInspector() {
@@ -1088,6 +1239,14 @@ function isDiagramInteractionCurrent(): boolean {
     !props.isRendering &&
     !props.errorMessage
   )
+}
+
+function openSelectedNodeMenu(event: MouseEvent) {
+  if (!canOpenDiagramContextMenu()) return
+  const id = [...selectedNodeIds.value][0]
+  if (!id || !(event.currentTarget instanceof HTMLElement)) return
+  const rect = event.currentTarget.getBoundingClientRect()
+  void openContextMenu(rect.left, rect.bottom + 4, id, null, event.currentTarget)
 }
 
 async function openContextMenu(
@@ -1246,7 +1405,7 @@ function createKeyboardNode(
       ? undefined
       : getMindmapNodeStructure(props.activeDiagramCode)[nodeIndex]
     nextNodeId = node && nodeIndex !== null
-      ? `node_${nodeIndex + node.subtreeSize}`
+      ? `node_${nodeIndex + node.subtreeSize + (relation === 'child' ? foldedBranches.value.get(nodeIndex) ?? 0 : 0)}`
       : nodeId
   } else if (isFlowchartSource(props.activeDiagramCode)) {
     nextNodeId = getNextFlowchartNodeId(props.activeDiagramCode)
@@ -1291,6 +1450,14 @@ function confirmMoveNode() {
   if (!moving || moving.targetIndex === null) return
   const nodeId = moving.nodeId
   const targetNodeId = `node_${moving.targetIndex}`
+  const structure = mindmapNodeOptions.value
+  const target = structure[moving.targetIndex]
+  const branch = structure[moving.nodeIndex]
+  if (target && branch) {
+    const end = target.index + target.subtreeSize
+    setPendingNodeFocus(`node_${end > branch.index ? end - branch.subtreeSize : end}`)
+    clearNodeSelection()
+  }
   closeMoveNodeDialog()
   emit('moveNode', nodeId, targetNodeId)
 }
@@ -1305,8 +1472,9 @@ function deleteContextNode() {
   const subtreeSize = nodeIndex === null
     ? 1
     : (getMindmapNodeStructure(props.activeDiagramCode)[nodeIndex]?.subtreeSize ?? 1)
+  const containsFoldedBranch = nodeIndex !== null && [...foldedBranches.value.keys()].some(index => index >= nodeIndex && index < nodeIndex + subtreeSize)
   const suffix = isMindmapDiagram.value
-    ? subtreeSize > 1
+    ? containsFoldedBranch ? '及其全部下级内容（包括折叠分支）' : subtreeSize > 1
       ? `及其 ${subtreeSize - 1} 个下级节点`
       : ''
     : '及其相关连线'
@@ -1347,6 +1515,7 @@ function deleteContextEdge() {
 }
 
 function handleContextMenuKeydown(event: KeyboardEvent) {
+  if (isComposingKey(event)) return
   const menu = contextMenuElement.value
   if (!menu) return
 
@@ -1415,6 +1584,8 @@ function prepareEditableNodes() {
       : getFlowchartNodeIdFromDomId(node.ownerSVGElement?.id ?? '', node.id),
   }))
   const editableNodeIds: string[] = []
+  const searchItems: Array<{ id: string; label: string }> = []
+  const mindmapLabels = new Map(mindmapNodeOptions.value.map(item => [`node_${item.index}`, item.label]))
 
   for (const { node, nodeId } of candidates) {
     if (
@@ -1423,9 +1594,10 @@ function prepareEditableNodes() {
       (!mindmap && !isEditableFlowchartNodeId(nodeId))
     ) continue
     const label = mindmap
-      ? getMindmapLabel(props.activeDiagramCode, nodeId)
+      ? mindmapLabels.get(nodeId) ?? null
       : getFlowchartNodeLabel(props.activeDiagramCode, nodeId)
     if (label === null) continue
+    searchItems.push({ id: nodeId, label })
     node.dataset.id = nodeId
     node.classList.add('is-node-editable')
     node.setAttribute('tabindex', '0')
@@ -1436,6 +1608,10 @@ function prepareEditableNodes() {
         ? '按 Enter 或 Tab 新建子节点并编辑'
         : '按 Enter 新建同级、按 Tab 新建子节点并编辑，双击编辑文字'
       : '按 Enter 新建同级、按 Tab 新建下级并编辑，双击编辑文字'
+    if (mindmap && foldedBranches.value.has(getMindmapNodeIndexFromDomId(nodeId) ?? -1)) {
+      node.classList.add('is-branch-folded')
+      node.setAttribute('title', '下级分支已折叠，可右键展开')
+    }
     const sortHint = mindmap ? '' : '；排序模式中可拖动到同级节点前方'
     node.setAttribute(
       'aria-label',
@@ -1444,6 +1620,7 @@ function prepareEditableNodes() {
     editableNodeIds.push(nodeId)
   }
 
+  searchableNodes.value = searchItems
   const editableNodeIdSet = new Set(editableNodeIds)
   selectedNodeIds.value = new Set(
     [...selectedNodeIds.value].filter((nodeId) => editableNodeIdSet.has(nodeId)),
@@ -1683,7 +1860,7 @@ function exitFallbackFullscreen() {
 }
 
 function handleFallbackFullscreenKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape' && !nodeEditorDialog.value?.open && !contextMenu.value) {
+  if (event.key === 'Escape' && !previewPanel.value?.querySelector('dialog[open]') && !contextMenu.value) {
     exitFallbackFullscreen()
   }
 }
@@ -1712,6 +1889,7 @@ function resetPreviewAfterLayout(focusStage: boolean) {
 }
 
 function handlePreviewKeydown(event: KeyboardEvent) {
+  if (isComposingKey(event)) return
   const stage = previewStage.value
   if (!stage) return
 
@@ -1858,6 +2036,14 @@ watch(
     await nextTick()
     prepareEditableNodes()
     if (nextSvg && previousSvg) restorePreviewPosition()
+    if (historyFocusRequested) {
+      historyFocusRequested = false
+      pendingNodeFocusId = null
+      const targetId = historyNodeAnchor ? resolveHistoryNode(historyNodeAnchor, searchableNodes.value) : null
+      historyNodeAnchor = null
+      if (targetId) { setNodeSelection(targetId); setPendingNodeFocus(targetId) }
+      else previewStage.value?.focus({ preventScroll: true })
+    }
     const inlineEditNodeId = pendingInlineEditNodeId
     pendingInlineEditNodeId = null
     if (inlineEditNodeId) {
@@ -1879,7 +2065,7 @@ watch(() => props.activeDiagramCode, () => {
   clearNodeSelection()
   if (!isFlowchartSource(props.activeDiagramCode)) {
     connectionMode.value = false
-    sortMode.value = false
+    if (!isMindmapDiagram.value) sortMode.value = false
   }
 })
 
@@ -1979,7 +2165,7 @@ onBeforeUnmount(() => {
             </div>
             <div>
               <dt>排序模式</dt>
-              <dd>拖动流程图节点到同级节点前方调整顺序</dd>
+              <dd>拖动节点到同级节点前方调整顺序，脑图分支整体移动</dd>
             </div>
           </dl>
         </div>
@@ -1997,7 +2183,7 @@ onBeforeUnmount(() => {
 
       <div class="export-actions">
         <button
-          v-if="!isMindmapDiagram"
+          v-if="isMindmapDiagram || isFlowchartSource(activeDiagramCode)"
           class="button button--secondary sort-mode-button"
           type="button"
           :disabled="!canUseSortMode"
@@ -2047,10 +2233,12 @@ onBeforeUnmount(() => {
           <FileDown v-else :size="16" />
           导出 SVG
         </button>
+        <PngExportPreview :svg="svgMarkup" :scale="pngScale" :padding="pngPadding"
+          :background-color="backgroundColor" :disabled="!canExport || Boolean(pngSizeError)" />
         <button
           class="button button--primary"
           type="button"
-          :disabled="!canExport"
+          :disabled="!canExport || Boolean(pngSizeError)"
           @click="emit('exportPng')"
         >
           <LoaderCircle v-if="exportingType === 'png'" class="spinning" :size="16" />
@@ -2114,20 +2302,14 @@ onBeforeUnmount(() => {
         </select>
       </label>
 
-      <template v-if="isMindmapDiagram || isFlowchartSource(activeDiagramCode)">
-        <label class="select-control" title="统一调整节点自动换行的宽度；留空跟随代码。手动换行会保留。">
-          <span>文字宽度</span>
-          <input type="number" min="40" max="2000" step="1" placeholder="自动" aria-label="节点文字宽度（像素）"
-            :value="nodeSizing.width ?? ''" @change="updateNodeSizing('width', $event)" />
-        </label>
-        <label class="select-control" title="统一调整框内留白，改变节点宽高；高度随文字行数自适应。留空跟随代码。">
-          <span>节点留白</span>
-          <input type="number" min="0" max="100" step="1" placeholder="自动" aria-label="节点留白（像素）"
-            :value="nodeSizing.padding ?? ''" @change="updateNodeSizing('padding', $event)" />
-        </label>
-        <button class="reset-view-button" :disabled="nodeSizing.width === null && nodeSizing.padding === null"
-          @click="emit('update:nodeSizing', { width: null, padding: null })">重置节点尺寸</button>
-      </template>
+      <button v-if="isMindmapDiagram || isFlowchartSource(activeDiagramCode)" type="button"
+        class="reset-view-button" :aria-expanded="appearancePanelOpen" aria-controls="diagram-appearance-panel"
+        @click="appearancePanelOpen = !appearancePanelOpen">图片排版 {{ appearancePanelOpen ? '收起' : '设置' }}</button>
+
+      <button v-if="selectedNodeIds.size" type="button" class="reset-view-button" :disabled="isRendering || Boolean(errorMessage)"
+        @click="openSelectedNodeMenu">节点操作{{ selectedNodeIds.size > 1 ? `（${selectedNodeIds.size}）` : '' }}</button>
+
+      <button v-if="isMindmapDiagram" type="button" class="reset-view-button" :aria-expanded="outlineOpen" aria-controls="mindmap-outline" @click="outlineOpen = !outlineOpen">{{ outlineOpen ? '收起大纲' : '脑图大纲' }}</button>
 
       <label class="select-control">
         <span>图片背景</span>
@@ -2186,10 +2368,27 @@ onBeforeUnmount(() => {
         回到左上角
       </button>
 
+      <div v-if="isMindmapDiagram || isFlowchartSource(activeDiagramCode)" class="node-search" role="search">
+        <input v-model="nodeSearch" type="search" aria-label="查找当前展开的节点" :placeholder="foldedBranches.size ? '查找展开节点' : '查找节点'"
+          @keydown="handleSearchKeydown" />
+        <template v-if="nodeSearch.trim()">
+          <span role="status">{{ searchMatches.length ? `${searchIndex + 1}/${searchMatches.length}` : '无匹配' }}</span>
+          <button type="button" class="reset-view-button" :disabled="!searchMatches.length || isRendering" aria-label="上一个匹配节点" @click="locateSearchResult(-1)">↑</button>
+          <button type="button" class="reset-view-button" :disabled="!searchMatches.length || isRendering" aria-label="下一个匹配节点" @click="locateSearchResult(1)">↓</button>
+        </template>
+      </div>
+
       <span v-if="outputSizeLabel" class="output-size">
         <Sparkles :size="14" />
         PNG 将导出为 {{ outputSizeLabel }}
       </span>
+
+      <span v-if="foldedBranches.size" class="fold-notice">
+        有 {{ foldedBranches.size }} 处分支已折叠，PNG 仅导出当前展开内容。
+        <button type="button" class="reset-view-button" :disabled="isRendering" @click="emit('expandBranches')">展开全部</button>
+      </span>
+
+      <span v-if="pngSizeError" class="theme-warning" role="status">{{ pngSizeError }}</span>
 
       <span v-if="showDarkBackgroundWarning" class="theme-warning">
         <AlertTriangle :size="14" />
@@ -2198,10 +2397,17 @@ onBeforeUnmount(() => {
 
     </div>
 
+    <DiagramAppearancePanel v-show="appearancePanelOpen && (isMindmapDiagram || isFlowchartSource(activeDiagramCode))"
+      id="diagram-appearance-panel" :model-value="nodeSizing" :mindmap="isMindmapDiagram"
+      @update:model-value="emit('update:nodeSizing', $event)" />
+
     <span id="preview-scroll-help" class="sr-only">
       可使用滚动条、触控板双指或鼠标拖拽移动；触控板捏合或 Ctrl 加滚轮缩放；也可使用方向键和翻页键查看。聚焦节点后可用 Tab 新建下级并编辑、Enter 新建同级，详细说明见页面顶部快捷键菜单。
     </span>
 
+    <div class="preview-body">
+      <MindmapOutline v-if="outlineOpen && isMindmapDiagram" id="mindmap-outline" :nodes="mindmapNodeOptions" :folded="foldedBranches" :selected-id="selectedNodeIds.size === 1 ? [...selectedNodeIds][0] : null"
+        :disabled="isRendering || Boolean(errorMessage)" @locate="locateOutlineNode" @toggle="toggleOutlineBranch" @close="outlineOpen = false" />
     <div
       ref="previewStage"
       class="preview-stage"
@@ -2299,6 +2505,8 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    </div>
+
     <div
       v-if="contextMenu"
       ref="contextMenuElement"
@@ -2356,6 +2564,9 @@ onBeforeUnmount(() => {
         </p>
       </template>
       <template v-else-if="contextMenu.nodeIds.length > 1">
+        <button v-if="!isMindmapDiagram" class="diagram-context-menu__item" type="button" role="menuitem" @click="openNodeAppearance">
+          <span aria-hidden="true">◧</span> 设置选中节点外观
+        </button>
         <button
           class="diagram-context-menu__item diagram-context-menu__item--danger"
           type="button"
@@ -2378,6 +2589,10 @@ onBeforeUnmount(() => {
         </p>
       </template>
       <template v-else>
+        <button v-if="contextMenu.nodeId" class="diagram-context-menu__item" type="button" role="menuitem" @click="openNodeAnnotation"><span aria-hidden="true">✎</span> 备注与链接</button>
+        <button v-if="contextMenu.nodeId && !isMindmapDiagram" class="diagram-context-menu__item" type="button" role="menuitem" @click="openNodeAppearance">
+          <span aria-hidden="true">◧</span> 设置节点外观
+        </button>
         <button
           v-if="contextMenu.nodeId"
           class="diagram-context-menu__item"
@@ -2400,6 +2615,9 @@ onBeforeUnmount(() => {
         </button>
         <div v-if="contextMenu.nodeId" class="diagram-context-menu__separator" role="separator" />
         <template v-if="isMindmapDiagram && contextMenu.nodeId">
+          <button class="diagram-context-menu__item" type="button" role="menuitem" :disabled="!canFoldContextNode" @click="toggleContextBranch"><span aria-hidden="true">{{ contextFoldedCount ? '+' : '−' }}</span>{{ contextFoldedCount ? `展开分支（${contextFoldedCount} 个节点）` : '折叠下级分支' }}</button>
+          <button class="diagram-context-menu__item" type="button" role="menuitem" :disabled="!canShiftMindmapNode(-1)" @click="shiftContextNode(-1)"><span aria-hidden="true">↑</span> 分支上移</button>
+          <button class="diagram-context-menu__item" type="button" role="menuitem" :disabled="!canShiftMindmapNode(1)" @click="shiftContextNode(1)"><span aria-hidden="true">↓</span> 分支下移</button>
           <button
             class="diagram-context-menu__item"
             type="button"
@@ -2473,6 +2691,12 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
+    <NodeAnnotationDialog ref="nodeAnnotationDialog" :source="activeDiagramCode"
+      @apply="(id, value) => emit('annotateNode', id, value)" @closed="schedulePendingNodeFocusRestore" />
+
+    <NodeAppearanceDialog ref="nodeAppearanceDialog" :source="activeDiagramCode"
+      @apply="(ids, appearance) => emit('styleNodes', ids, appearance)" @closed="schedulePendingNodeFocusRestore" />
+
     <dialog
       ref="nodeEditorDialog"
       class="node-edit-dialog"
@@ -2509,8 +2733,7 @@ onBeforeUnmount(() => {
           aria-label="节点文字"
           maxlength="5000"
           rows="5"
-          @keydown.meta.enter.prevent="saveNodeLabel"
-          @keydown.ctrl.enter.prevent="saveNodeLabel"
+          @keydown="handleNodeDialogShortcut"
         />
         <label v-if="editingNode.mode === 'insert' && isMindmapDiagram" class="node-edit-field">
           <span>节点形状</span>
@@ -2631,6 +2854,10 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.preview-body { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
+.preview-body > .preview-stage { min-width: 0; }
+@media (max-width: 760px) { .preview-body { flex-direction: column; } }
+
 .preview-panel {
   min-width: 0;
 }
@@ -2663,6 +2890,10 @@ onBeforeUnmount(() => {
 .preview-panel.is-fallback-fullscreen .settings-bar {
   padding-inline: 22px;
 }
+
+.fold-notice { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-secondary); }
+.node-search { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; font-size: 11px; }
+.node-search input { width: 130px; height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 7px; font: 12px var(--font-sans); }
 
 .preview-panel:fullscreen .preview-stage,
 .preview-panel.is-fallback-fullscreen .preview-stage {
@@ -3072,6 +3303,8 @@ onBeforeUnmount(() => {
   outline: 3px solid rgb(99 102 241 / 58%);
   outline-offset: 4px;
 }
+
+.diagram :deep(.is-branch-folded) { outline: 1px dashed #6366f1; outline-offset: 4px; }
 
 .diagram :deep(g.node.is-node-selected),
 .diagram :deep(g.rough-node.is-node-selected) {
@@ -3533,7 +3766,7 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 1220px) {
-  .select-control > span:first-child {
+  .select-control:not(.appearance-control) > span:first-child {
     display: none;
   }
 
@@ -3576,7 +3809,8 @@ onBeforeUnmount(() => {
   }
 
   .select-control {
-    flex: 1;
+    flex: 1 0 110px;
+    min-width: 110px;
   }
 
   .select-control select {

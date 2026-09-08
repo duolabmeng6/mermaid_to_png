@@ -301,3 +301,19 @@ describe('脑图节点源码编辑', () => {
     )
   })
 })
+
+describe('大脑图结构索引', () => {
+  it('数千个同级节点保持正确的父级和子树范围', () => {
+    const source = 'mindmap\n  根节点\n' + Array.from({ length: 3000 }, (_, index) => `    节点${index}`).join('\n')
+    const nodes = getMindmapNodeStructure(source)
+    expect(nodes).toHaveLength(3001)
+    expect(nodes[0].subtreeSize).toBe(3001)
+    expect(nodes[3000]).toMatchObject({ depth: 1, parentIndex: 0, subtreeSize: 1 })
+  })
+  it('深层结构使用迭代索引，不递归反复遍历祖先', () => {
+    const source = 'mindmap\n' + Array.from({ length: 400 }, (_, index) => `${' '.repeat(index + 1)}节点${index}`).join('\n')
+    const nodes = getMindmapNodeStructure(source)
+    expect(nodes[399]).toMatchObject({ depth: 399, parentIndex: 398, subtreeSize: 1 })
+    expect(nodes[100].subtreeSize).toBe(300)
+  })
+})

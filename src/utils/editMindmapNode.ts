@@ -1,3 +1,4 @@
+import { MINDMAP_NOTE_PREFIX, decodeNodeAnnotation, encodeCommentData, normalizeNodeAnnotation, type NodeAnnotation } from './nodeAnnotation'
 export type MindmapNodeShape =
   | 'default'
   | 'rectangle'
@@ -91,26 +92,20 @@ export function getMindmapNodeLabel(
 
 export function getMindmapNodeStructure(source: string): MindmapNodeSummary[] {
   const nodes = findMindmapNodeRanges(source)
-  return nodes.map((node, index) => {
-    const nodeIndent = indentationWidth(node.indentation)
-    let parentIndex: number | null = null
-    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-      if (indentationWidth(nodes[cursor].indentation) < nodeIndent) {
-        parentIndex = cursor
-        break
-      }
+  const summaries: MindmapNodeSummary[] = []
+  const ancestors: Array<{ index: number; indent: number }> = []
+  for (const [index, node] of nodes.entries()) {
+    const indent = indentationWidth(node.indentation)
+    while (ancestors.length && ancestors[ancestors.length - 1].indent >= indent) {
+      const finished = ancestors.pop()!
+      summaries[finished.index].subtreeSize = index - finished.index
     }
-
-    const depth = parentIndex === null ? 0 : getNodeDepth(nodes, parentIndex) + 1
-    let subtreeSize = 1
-    while (
-      index + subtreeSize < nodes.length &&
-      indentationWidth(nodes[index + subtreeSize].indentation) > nodeIndent
-    ) {
-      subtreeSize += 1
-    }
-    return { index, label: node.label, depth, parentIndex, subtreeSize }
-  })
+    summaries.push({ index, label: node.label, depth: ancestors.length,
+      parentIndex: ancestors.length ? ancestors[ancestors.length - 1].index : null, subtreeSize: 1 })
+    ancestors.push({ index, indent })
+  }
+  for (const ancestor of ancestors) summaries[ancestor.index].subtreeSize = nodes.length - ancestor.index
+  return summaries
 }
 
 export function updateMindmapNodeLabel(
@@ -174,6 +169,11 @@ export function insertMindmapNode(
     return null
   }
 
+  if (getMindmapFoldedCount(source, normalizedParentIndex) > 0) {
+    const expanded = toggleMindmapBranch(source, normalizedParentIndex)
+    if (expanded === null) return null
+    source = expanded
+  }
   const nodes = findMindmapNodeRanges(source)
   const parent = nodes[normalizedParentIndex]
   if (!parent) return null
@@ -282,6 +282,165 @@ export function moveMindmapNode(
     if (!hadTrailingEnding) movedBlock = movedBlock.replace(/(?:\r\n|\r|\n)$/, '')
   }
   return before + movedBlock + after
+}
+
+/** Reorder a complete branch before a sibling; hierarchy and node text stay intact. */
+export function reorderMindmapNode(source: string, nodeIndex: MindmapNodeIdentifier, beforeIndex: MindmapNodeIdentifier): string | null {
+  const index = normalizeMindmapNodeIndex(nodeIndex)
+  const before = normalizeMindmapNodeIndex(beforeIndex)
+  if (!isMindmapSource(source) || index === null || before === null || index <= 0 || before <= 0) return null
+  const nodes = findMindmapNodeRanges(source)
+  const structure = getMindmapNodeStructure(source)
+  if (!nodes[index] || !nodes[before] || structure[index].parentIndex !== structure[before].parentIndex) return null
+  if (index === before) return source
+  const start = nodes[index].lineStart
+  const end = findSubtreeBoundary(nodes, nodes[index])?.lineStart ?? source.length
+  const insertion = nodes[before].lineStart
+  if (end === insertion) return source
+  const ending = source.match(/\r\n|\r|\n/)?.[0] ?? '\n'
+  let block = source.slice(start, end)
+  const remainder = source.slice(0, start) + source.slice(end)
+  const offset = insertion > start ? insertion - (end - start) : insertion
+  if (!/(?:\r\n|\r|\n)$/.test(block)) block += ending
+  let result = remainder.slice(0, offset) + block + remainder.slice(offset)
+  if (!/(?:\r\n|\r|\n)$/.test(source)) result = result.replace(/(?:\r\n|\r|\n)$/, '')
+  return result
+}
+
+export function shiftMindmapNode(source: string, nodeIndex: MindmapNodeIdentifier, direction: -1 | 1): string | null {
+  const index = normalizeMindmapNodeIndex(nodeIndex)
+  if (index === null || index <= 0) return null
+  const structure = getMindmapNodeStructure(source)
+  if (!structure[index]) return null
+  const siblings = structure.filter(item => item.parentIndex === structure[index].parentIndex)
+  const position = siblings.findIndex(item => item.index === index)
+  const neighbor = siblings[position + direction]
+  if (!neighbor) return null
+  return direction === -1 ? reorderMindmapNode(source, index, neighbor.index) : reorderMindmapNode(source, neighbor.index, index)
+}
+
+function findMindmapAnnotation(source: string, target: MindmapNodeRange, next: MindmapNodeRange | undefined) {
+  const tail = source.slice(target.fullEnd, next?.lineStart ?? source.length)
+  for (const match of tail.matchAll(/[^\r\n]+/g)) {
+    const text = match[0].trim()
+    if (!text.startsWith(MINDMAP_NOTE_PREFIX)) continue
+    const value = decodeNodeAnnotation(text.slice(MINDMAP_NOTE_PREFIX.length))
+    if (value) return { value, start: target.fullEnd + match.index!, end: target.fullEnd + match.index! + match[0].length }
+  }
+  return null
+}
+export function readMindmapNodeAnnotation(source: string, nodeIndex: MindmapNodeIdentifier): NodeAnnotation | null {
+  const index = normalizeMindmapNodeIndex(nodeIndex)
+  if (index === null) return null
+  const nodes = findMindmapNodeRanges(source)
+  return nodes[index] ? findMindmapAnnotation(source, nodes[index], nodes[index + 1])?.value ?? null : null
+}
+export function updateMindmapNodeAnnotation(source: string, nodeIndex: MindmapNodeIdentifier, value: NodeAnnotation): string | null {
+  const index = normalizeMindmapNodeIndex(nodeIndex)
+  if (!isMindmapSource(source) || index === null) return null
+  const nodes = findMindmapNodeRanges(source)
+  const target = nodes[index]
+  if (!target) return null
+  const annotation = normalizeNodeAnnotation(value)
+  const existing = findMindmapAnnotation(source, target, nodes[index + 1])
+  const ending = source.match(/\r\n|\r|\n/)?.[0] ?? '\n'
+  const marker = `${target.indentation}${inferIndentUnit(nodes, target)}${MINDMAP_NOTE_PREFIX}${encodeCommentData(annotation)}`
+  if (existing) {
+    if (!annotation.note && !annotation.url) {
+      const previousEnding = source.slice(0, existing.start).match(/(?:\r\n|\r|\n)$/)?.[0].length ?? 0
+      return source.slice(0, existing.start - previousEnding) + source.slice(existing.end)
+    }
+    return source.slice(0, existing.start) + marker + source.slice(existing.end)
+  }
+  if (!annotation.note && !annotation.url) return source
+  const before = source.slice(0, target.fullEnd)
+  const after = source.slice(target.fullEnd)
+  return before + (before.endsWith(ending) ? '' : ending) + marker + (after || before.endsWith(ending) ? ending : '') + after
+}
+
+const FOLD_PREFIX = '%% mermaid-image-studio:fold:v1 '
+interface FoldedBranch { version: 1; indent: string; source: string; count: number }
+
+function findFoldedBranch(source: string, target: MindmapNodeRange, next: MindmapNodeRange | undefined) {
+  const tail = source.slice(target.fullEnd, next?.lineStart ?? source.length)
+  const lines = tail.matchAll(/[^\r\n]+/g)
+  for (const match of lines) {
+    const text = match[0].trim()
+    if (!text.startsWith(FOLD_PREFIX)) continue
+    try {
+      const binary = atob(text.slice(FOLD_PREFIX.length))
+      if (binary.length > 5 * 1024 * 1024) return null
+      const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(binary, char => char.charCodeAt(0)))) as FoldedBranch
+      if (value.version !== 1 || typeof value.source !== 'string' || !value.source ||
+          typeof value.indent !== 'string' || !/^[ \t]*$/.test(value.indent) ||
+          !Number.isInteger(value.count) || value.count < 1) return null
+      return { value, start: target.fullEnd + match.index!, end: target.fullEnd + match.index! + match[0].length }
+    } catch { return null }
+  }
+  return null
+}
+
+export function getMindmapFoldedCounts(source: string): Map<number, number> {
+  const nodes = findMindmapNodeRanges(source)
+  const counts = new Map<number, number>()
+  for (const node of nodes) {
+    const branch = findFoldedBranch(source, node, nodes[node.index + 1])
+    if (branch) counts.set(node.index, branch.value.count)
+  }
+  return counts
+}
+
+export function expandAllMindmapBranches(source: string): string | null {
+  let result = source
+  for (let step = 0; step < 1000; step++) {
+    const index = getMindmapFoldedCounts(result).keys().next().value
+    if (index === undefined) return result
+    const next = toggleMindmapBranch(result, index)
+    if (next === null || next === result || next.length > 5 * 1024 * 1024) return null
+    result = next
+  }
+  return null
+}
+
+export function getMindmapFoldedCount(source: string, nodeIndex: MindmapNodeIdentifier): number {
+  const index = normalizeMindmapNodeIndex(nodeIndex)
+  if (index === null) return 0
+  const nodes = findMindmapNodeRanges(source)
+  const target = nodes[index]
+  return target ? findFoldedBranch(source, target, nodes[index + 1])?.value.count ?? 0 : 0
+}
+
+/** Store hidden branches in Mermaid comments; rendering/export uses the visible source. */
+export function toggleMindmapBranch(source: string, nodeIndex: MindmapNodeIdentifier): string | null {
+  const index = normalizeMindmapNodeIndex(nodeIndex)
+  if (!isMindmapSource(source) || index === null) return null
+  const nodes = findMindmapNodeRanges(source)
+  const target = nodes[index]
+  if (!target) return null
+  const folded = findFoldedBranch(source, target, nodes[index + 1])
+  const ending = source.match(/\r\n|\r|\n/)?.[0] ?? '\n'
+  if (folded) {
+    let restored = reindentBlock(folded.value.source, folded.value.indent, target.indentation)
+    // The payload already contains its original ending; consume the marker line's ending.
+    const after = source.slice(folded.end).replace(/^(?:\r\n|\r|\n)/, '')
+    if (after && !/(?:\r\n|\r|\n)$/.test(restored)) restored += ending
+    if (!after && !/(?:\r\n|\r|\n)$/.test(source)) restored = restored.replace(/(?:\r\n|\r|\n)$/, '')
+    if (!after && /(?:\r\n|\r|\n)$/.test(source) && !/(?:\r\n|\r|\n)$/.test(restored)) restored += ending
+    return source.slice(0, folded.start) + restored + after
+  }
+  const structure = getMindmapNodeStructure(source)
+  const count = structure[index].subtreeSize - 1
+  if (count <= 0) return null
+  const start = nodes[index + 1].lineStart
+  const end = nodes[index + structure[index].subtreeSize]?.lineStart ?? source.length
+  const subtree = source.slice(start, end)
+  const value: FoldedBranch = { version: 1, indent: target.indentation, source: subtree, count }
+  const bytes = new TextEncoder().encode(JSON.stringify(value))
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  const marker = `${target.indentation}${inferIndentUnit(nodes, target)}${FOLD_PREFIX}${btoa(binary)}`
+  const hasEnding = /(?:\r\n|\r|\n)$/.test(subtree)
+  return source.slice(0, start) + marker + (hasEnding ? ending : '') + source.slice(end)
 }
 
 export function deleteMindmapNode(
@@ -416,16 +575,6 @@ function findSubtreeRemovalEnd(source: string, target: MindmapNodeRange): number
     if (indentationWidth(indentation) <= targetIndent) return line.start
   }
   return source.length
-}
-
-function getNodeDepth(nodes: MindmapNodeRange[], index: number): number {
-  const nodeIndent = indentationWidth(nodes[index].indentation)
-  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-    if (indentationWidth(nodes[cursor].indentation) < nodeIndent) {
-      return getNodeDepth(nodes, cursor) + 1
-    }
-  }
-  return 0
 }
 
 function reindentBlock(block: string, from: string, to: string): string {

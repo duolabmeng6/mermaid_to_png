@@ -1,8 +1,11 @@
 import { onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import mermaid from 'mermaid'
+import { RenderQueue } from '../utils/renderQueue'
 import { getThemePreset } from '../data/themePresets'
 import type { DiagramDimensions, MermaidTheme } from '../types/diagram'
 import { applyDiagramLayout, type DiagramLayout } from '../utils/applyDiagramLayout'
+import { getAppearanceConfig, readDiagramAppearance, type NodeSizing } from '../utils/diagramAppearance'
+export type { NodeSizing } from '../utils/diagramAppearance'
 import { getSvgDimensions } from '../utils/exportDiagram'
 
 const FONT_FAMILY =
@@ -10,12 +13,7 @@ const FONT_FAMILY =
 
 const RENDER_DELAY = 320
 let renderSequence = 0
-let renderQueue = Promise.resolve()
-
-export interface NodeSizing {
-  width: number | null
-  padding: number | null
-}
+const renderQueue = new RenderQueue()
 
 export interface RenderedMermaidDiagram {
   svg: string
@@ -26,16 +24,15 @@ export function renderMermaidDiagram(
   source: string,
   selectedTheme: MermaidTheme,
   layout: DiagramLayout = 'source',
-  nodeSizing: NodeSizing = { width: null, padding: null },
+  nodeSizing: NodeSizing = readDiagramAppearance(null),
+  options: { priority?: 'preview' | 'export' | 'thumbnail'; signal?: AbortSignal } = {},
 ): Promise<RenderedMermaidDiagram> {
-  const job = renderQueue.then(() =>
-    renderDiagram(applyDiagramLayout(source, layout), selectedTheme, nodeSizing),
+  const appearanceSnapshot = readDiagramAppearance(nodeSizing)
+  const priorities = { preview: 30, export: 20, thumbnail: 10 }
+  return renderQueue.enqueue(
+    () => renderDiagram(applyDiagramLayout(source, layout), selectedTheme, appearanceSnapshot),
+    priorities[options.priority ?? 'preview'], options.signal,
   )
-  renderQueue = job.then(
-    () => undefined,
-    () => undefined,
-  )
-  return job
 }
 
 export function useMermaidRenderer(
@@ -50,9 +47,13 @@ export function useMermaidRenderer(
   const dimensions = ref<DiagramDimensions | null>(null)
 
   let revision = 0
+  let controller: AbortController | undefined
   let debounceTimer: number | undefined
   const scheduleRender = (immediate = false) => {
     window.clearTimeout(debounceTimer)
+    controller?.abort()
+    controller = new AbortController()
+    const signal = controller.signal
     const currentRevision = ++revision
 
     if (!code.value.trim()) {
@@ -68,7 +69,7 @@ export function useMermaidRenderer(
       const source = code.value
       const selectedTheme = theme.value
       const selectedLayout = layout.value
-      void renderCurrentDiagram(source, selectedTheme, selectedLayout, currentRevision)
+      void renderCurrentDiagram(source, selectedTheme, selectedLayout, currentRevision, signal)
     }
 
     if (immediate) run()
@@ -80,11 +81,12 @@ export function useMermaidRenderer(
     selectedTheme: MermaidTheme,
     selectedLayout: DiagramLayout,
     currentRevision: number,
+    signal: AbortSignal,
   ) => {
     if (currentRevision !== revision) return
 
     try {
-      const rendered = await renderMermaidDiagram(source, selectedTheme, selectedLayout, nodeSizing.value)
+      const rendered = await renderMermaidDiagram(source, selectedTheme, selectedLayout, nodeSizing.value, { priority: 'preview', signal })
       if (currentRevision !== revision) return
 
       svgMarkup.value = rendered.svg
@@ -105,6 +107,7 @@ export function useMermaidRenderer(
 
   onBeforeUnmount(() => {
     revision += 1
+    controller?.abort()
     window.clearTimeout(debounceTimer)
   })
 
@@ -123,26 +126,29 @@ async function renderDiagram(
   nodeSizing: NodeSizing,
 ): Promise<RenderedMermaidDiagram> {
   const selectedPreset = getThemePreset(selectedTheme)
+  const appearance = getAppearanceConfig(nodeSizing)
   mermaid.initialize({
+    ...appearance,
     startOnLoad: false,
     securityLevel: 'strict',
     suppressErrorRendering: true,
     theme: selectedPreset.mermaidTheme,
     fontFamily: FONT_FAMILY,
     htmlLabels: false,
+    // Mermaid 11.17 positions SVG labels at x=0 for centered shapes, but
+    // mindmap styles omit the anchor used by those shapes. Keep this inside
+    // the generated SVG so preview, thumbnails and exports agree.
+    themeCSS: '.mindmap-node > .label[transform^="translate(0,"] text { text-anchor: middle; }',
     themeVariables: {
       ...selectedPreset.themeVariables,
       fontFamily: FONT_FAMILY,
+      ...appearance.themeVariables,
     },
     flowchart: {
       useMaxWidth: true,
-      ...(nodeSizing.width !== null ? { wrappingWidth: nodeSizing.width } : {}),
-      ...(nodeSizing.padding !== null ? { padding: nodeSizing.padding } : {}),
+      ...appearance.flowchart,
     },
-    mindmap: {
-      ...(nodeSizing.width !== null ? { maxNodeWidth: nodeSizing.width } : {}),
-      ...(nodeSizing.padding !== null ? { padding: nodeSizing.padding } : {}),
-    },
+    mindmap: appearance.mindmap,
     sequence: {
       useMaxWidth: true,
     },

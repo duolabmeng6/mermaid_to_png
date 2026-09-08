@@ -1,3 +1,4 @@
+import { removeFlowchartNodeAnnotation } from './nodeAnnotation'
 import type { MermaidBlock } from './extractMermaidBlocks'
 
 interface NodeLabelRange {
@@ -296,7 +297,7 @@ export function deleteFlowchartNode(source: string, nodeId: string): string | nu
     nextSource += `${keptCode ? `${indentation}${keptCode}` : indentation.trimEnd()}${comment}${lineEnding}`
   }
 
-  return found ? nextSource : null
+  return found ? removeFlowchartNodeAnnotation(nextSource, nodeId) : null
 }
 
 /**

@@ -12,6 +12,7 @@ import {
   Trash2,
   Undo2,
 } from '@lucide/vue'
+import { isComposingKey } from '../utils/editorInteraction'
 import type { DiagramExample } from '../types/diagram'
 
 const props = defineProps<{
@@ -124,14 +125,14 @@ function commitEditorValue(value: string) {
   emit('update:modelValue', value)
 }
 
-function applyHistoryValue(snapshot: EditorSnapshot) {
+function applyHistoryValue(snapshot: EditorSnapshot, restoreFocus: boolean) {
   currentEditorValue = snapshot.value
   pendingSnapshot = null
   emit('update:modelValue', snapshot.value)
   nextTick(() => {
     const target = textarea.value
     if (!target) return
-    target.focus()
+    if (restoreFocus) target.focus()
     target.selectionStart = Math.min(snapshot.selectionStart, snapshot.value.length)
     target.selectionEnd = Math.min(snapshot.selectionEnd, snapshot.value.length)
     target.scrollTop = snapshot.scrollTop
@@ -139,21 +140,22 @@ function applyHistoryValue(snapshot: EditorSnapshot) {
   })
 }
 
-function undoEdit() {
+function undoEdit(restoreFocus = true) {
   const previousSnapshot = historyPast.value.pop()
   if (!previousSnapshot) return
   pushHistory(historyFuture.value, createSnapshot(currentEditorValue))
-  applyHistoryValue(previousSnapshot)
+  applyHistoryValue(previousSnapshot, restoreFocus)
 }
 
-function redoEdit() {
+function redoEdit(restoreFocus = true) {
   const nextSnapshot = historyFuture.value.pop()
   if (!nextSnapshot) return
   pushHistory(historyPast.value, createSnapshot(currentEditorValue))
-  applyHistoryValue(nextSnapshot)
+  applyHistoryValue(nextSnapshot, restoreFocus)
 }
 
 function handleEditorShortcut(event: KeyboardEvent) {
+  if (isComposingKey(event)) return
   if (!event.metaKey && !event.ctrlKey) return
 
   const key = event.key.toLowerCase()
@@ -171,6 +173,8 @@ function handleEditorShortcut(event: KeyboardEvent) {
 }
 
 function handleTab(event: KeyboardEvent) {
+  if (isComposingKey(event)) return
+  event.preventDefault()
   const target = event.target as HTMLTextAreaElement
   const start = target.selectionStart
   const end = target.selectionEnd
@@ -227,7 +231,7 @@ watch(
           :disabled="!canUndo"
           aria-label="撤销"
           title="撤销（Cmd/Ctrl+Z）"
-          @click="undoEdit"
+          @click="undoEdit()"
         >
           <Undo2 :size="16" aria-hidden="true" />
         </button>
@@ -237,7 +241,7 @@ watch(
           :disabled="!canRedo"
           aria-label="重做"
           title="重做（Cmd/Ctrl+Shift+Z）"
-          @click="redoEdit"
+          @click="redoEdit()"
         >
           <Redo2 :size="16" aria-hidden="true" />
         </button>
@@ -300,7 +304,7 @@ watch(
           @beforeinput="captureBeforeInputState"
           @scroll="syncGutter"
           @keydown="handleEditorShortcut"
-          @keydown.tab.prevent="handleTab"
+          @keydown.tab="handleTab"
         />
       </div>
 
@@ -315,7 +319,7 @@ watch(
       <footer class="editor-footer">
         <span :class="{ 'save-warning': !draftSaved }">
           <i class="save-dot" />
-          {{ draftSaved ? '草稿已保存在当前浏览器' : '浏览器未允许保存，请勿刷新页面' }}
+          {{ draftSaved ? '草稿已保存在当前浏览器' : '尚未保存，请查看顶部文档状态' }}
         </span>
         <span>
           {{ lineCount }} 行 · {{ characterCount }} 个字符{{

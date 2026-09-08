@@ -28,6 +28,7 @@ const emit = defineEmits<{
 const RENDER_DELAY = 320
 const thumbnails = ref<ThumbnailState[]>([])
 let revision = 0
+let controller: AbortController | undefined
 let debounceTimer: number | undefined
 let isInitialRender = true
 
@@ -40,6 +41,9 @@ watch(
       keys.length !== previous.length || keys.some((key, index) => previous[index]?.key !== key)
     if (!hasChanges) return
 
+    controller?.abort()
+    controller = new AbortController()
+    const signal = controller.signal
     const currentRevision = ++revision
     window.clearTimeout(debounceTimer)
     const readyCache = new Map(
@@ -60,7 +64,7 @@ watch(
       return { key, svg: '', status: 'loading' }
     })
     const run = () =>
-      void renderThumbnails([...diagrams], theme, layout, nodeSizing, currentRevision, pendingIndexes)
+      void renderThumbnails([...diagrams], theme, layout, nodeSizing, currentRevision, pendingIndexes, signal)
 
     if (isInitialRender) {
       isInitialRender = false
@@ -75,6 +79,7 @@ watch(
 onBeforeUnmount(() => {
   window.clearTimeout(debounceTimer)
   revision += 1
+  controller?.abort()
 })
 
 async function renderThumbnails(
@@ -84,13 +89,15 @@ async function renderThumbnails(
   nodeSizing: NodeSizing,
   currentRevision: number,
   indexes: number[],
+  signal: AbortSignal,
 ) {
   const renderedByKey = new Map<string, string | null>()
   for (const index of indexes) {
+    if (signal.aborted || currentRevision !== revision) return
     const key = `${theme}\0${layout}\0${JSON.stringify(nodeSizing)}\0${diagrams[index].code}`
     if (!renderedByKey.has(key)) {
       try {
-        const rendered = await renderMermaidDiagram(diagrams[index].code, theme, layout, nodeSizing)
+        const rendered = await renderMermaidDiagram(diagrams[index].code, theme, layout, nodeSizing, { priority: 'thumbnail', signal })
         renderedByKey.set(key, rendered.svg)
       } catch {
         renderedByKey.set(key, null)
