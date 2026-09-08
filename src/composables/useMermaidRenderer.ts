@@ -12,6 +12,11 @@ const RENDER_DELAY = 320
 let renderSequence = 0
 let renderQueue = Promise.resolve()
 
+export interface NodeSizing {
+  width: number | null
+  padding: number | null
+}
+
 export interface RenderedMermaidDiagram {
   svg: string
   dimensions: DiagramDimensions
@@ -21,9 +26,10 @@ export function renderMermaidDiagram(
   source: string,
   selectedTheme: MermaidTheme,
   layout: DiagramLayout = 'source',
+  nodeSizing: NodeSizing = { width: null, padding: null },
 ): Promise<RenderedMermaidDiagram> {
   const job = renderQueue.then(() =>
-    renderDiagram(applyDiagramLayout(source, layout), selectedTheme),
+    renderDiagram(applyDiagramLayout(source, layout), selectedTheme, nodeSizing),
   )
   renderQueue = job.then(
     () => undefined,
@@ -36,6 +42,7 @@ export function useMermaidRenderer(
   code: Ref<string>,
   theme: Ref<MermaidTheme>,
   layout: Ref<DiagramLayout>,
+  nodeSizing: Ref<NodeSizing>,
 ) {
   const svgMarkup = ref('')
   const errorMessage = ref('')
@@ -77,7 +84,7 @@ export function useMermaidRenderer(
     if (currentRevision !== revision) return
 
     try {
-      const rendered = await renderMermaidDiagram(source, selectedTheme, selectedLayout)
+      const rendered = await renderMermaidDiagram(source, selectedTheme, selectedLayout, nodeSizing.value)
       if (currentRevision !== revision) return
 
       svgMarkup.value = rendered.svg
@@ -94,7 +101,7 @@ export function useMermaidRenderer(
   const renderNow = () => scheduleRender(true)
 
   onMounted(() => scheduleRender(true))
-  watch([code, theme, layout], () => scheduleRender())
+  watch([code, theme, layout, nodeSizing], () => scheduleRender())
 
   onBeforeUnmount(() => {
     revision += 1
@@ -113,6 +120,7 @@ export function useMermaidRenderer(
 async function renderDiagram(
   source: string,
   selectedTheme: MermaidTheme,
+  nodeSizing: NodeSizing,
 ): Promise<RenderedMermaidDiagram> {
   const selectedPreset = getThemePreset(selectedTheme)
   mermaid.initialize({
@@ -128,6 +136,12 @@ async function renderDiagram(
     },
     flowchart: {
       useMaxWidth: true,
+      ...(nodeSizing.width !== null ? { wrappingWidth: nodeSizing.width } : {}),
+      ...(nodeSizing.padding !== null ? { padding: nodeSizing.padding } : {}),
+    },
+    mindmap: {
+      ...(nodeSizing.width !== null ? { maxNodeWidth: nodeSizing.width } : {}),
+      ...(nodeSizing.padding !== null ? { padding: nodeSizing.padding } : {}),
     },
     sequence: {
       useMaxWidth: true,

@@ -55,6 +55,8 @@ import {
   getZoomAnchor,
 } from '../utils/previewNavigation'
 
+import type { NodeSizing } from '../composables/useMermaidRenderer'
+
 type PreviewZoom = 'fit' | number
 
 interface PreviewDragState {
@@ -142,6 +144,7 @@ const props = defineProps<{
   dimensions: DiagramDimensions | null
   theme: MermaidTheme
   layout: DiagramLayout
+  nodeSizing: NodeSizing
   background: ExportBackground
   backgroundColor: string
   pngScale: PngScale
@@ -152,6 +155,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:theme': [value: MermaidTheme]
+  'update:nodeSizing': [value: NodeSizing]
   'update:layout': [value: DiagramLayout]
   'update:background': [value: ExportBackground]
   'update:pngScale': [value: PngScale]
@@ -342,6 +346,12 @@ const inlineNodeEditorStyle = computed(() => {
 
 function updateTheme(event: Event) {
   emit('update:theme', (event.target as HTMLSelectElement).value as MermaidTheme)
+}
+
+function updateNodeSizing(key: 'width' | 'padding', event: Event) {
+  const input = event.target as HTMLInputElement
+  if (!input.checkValidity()) { input.reportValidity(); return }
+  emit('update:nodeSizing', { ...props.nodeSizing, [key]: input.value === '' ? null : Number(input.value) })
 }
 
 function updateLayout(event: Event) {
@@ -2104,6 +2114,21 @@ onBeforeUnmount(() => {
         </select>
       </label>
 
+      <template v-if="isMindmapDiagram || isFlowchartSource(activeDiagramCode)">
+        <label class="select-control" title="统一调整节点自动换行的宽度；留空跟随代码。手动换行会保留。">
+          <span>文字宽度</span>
+          <input type="number" min="40" max="2000" step="1" placeholder="自动" aria-label="节点文字宽度（像素）"
+            :value="nodeSizing.width ?? ''" @change="updateNodeSizing('width', $event)" />
+        </label>
+        <label class="select-control" title="统一调整框内留白，改变节点宽高；高度随文字行数自适应。留空跟随代码。">
+          <span>节点留白</span>
+          <input type="number" min="0" max="100" step="1" placeholder="自动" aria-label="节点留白（像素）"
+            :value="nodeSizing.padding ?? ''" @change="updateNodeSizing('padding', $event)" />
+        </label>
+        <button class="reset-view-button" :disabled="nodeSizing.width === null && nodeSizing.padding === null"
+          @click="emit('update:nodeSizing', { width: null, padding: null })">重置节点尺寸</button>
+      </template>
+
       <label class="select-control">
         <span>图片背景</span>
         <select aria-label="图片背景" :value="background" @change="updateBackground">
@@ -2759,6 +2784,18 @@ onBeforeUnmount(() => {
   color: var(--text-faint);
   font-size: 11.5px;
   font-weight: 600;
+}
+
+.select-control input {
+  width: 76px;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  font: 600 12px var(--font-sans);
 }
 
 .select-control select {

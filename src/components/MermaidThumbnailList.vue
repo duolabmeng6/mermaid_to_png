@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
-import { renderMermaidDiagram } from '../composables/useMermaidRenderer'
+import { type NodeSizing, renderMermaidDiagram } from '../composables/useMermaidRenderer'
 import type { MermaidTheme } from '../types/diagram'
 import type { DiagramLayout } from '../utils/applyDiagramLayout'
 import type { MermaidBlock } from '../utils/extractMermaidBlocks'
@@ -15,6 +15,7 @@ const props = defineProps<{
   diagrams: MermaidBlock[]
   theme: MermaidTheme
   layout: DiagramLayout
+  nodeSizing: NodeSizing
   backgroundColor: string
   activeDiagramIndex: number
   isExporting: boolean
@@ -31,9 +32,9 @@ let debounceTimer: number | undefined
 let isInitialRender = true
 
 watch(
-  [() => props.diagrams, () => props.theme, () => props.layout],
-  ([diagrams, theme, layout]) => {
-    const keys = diagrams.map((diagram) => `${theme}\0${layout}\0${diagram.code}`)
+  [() => props.diagrams, () => props.theme, () => props.layout, () => props.nodeSizing],
+  ([diagrams, theme, layout, nodeSizing]) => {
+    const keys = diagrams.map((diagram) => `${theme}\0${layout}\0${JSON.stringify(nodeSizing)}\0${diagram.code}`)
     const previous = thumbnails.value
     const hasChanges =
       keys.length !== previous.length || keys.some((key, index) => previous[index]?.key !== key)
@@ -59,7 +60,7 @@ watch(
       return { key, svg: '', status: 'loading' }
     })
     const run = () =>
-      void renderThumbnails([...diagrams], theme, layout, currentRevision, pendingIndexes)
+      void renderThumbnails([...diagrams], theme, layout, nodeSizing, currentRevision, pendingIndexes)
 
     if (isInitialRender) {
       isInitialRender = false
@@ -80,15 +81,16 @@ async function renderThumbnails(
   diagrams: MermaidBlock[],
   theme: MermaidTheme,
   layout: DiagramLayout,
+  nodeSizing: NodeSizing,
   currentRevision: number,
   indexes: number[],
 ) {
   const renderedByKey = new Map<string, string | null>()
   for (const index of indexes) {
-    const key = `${theme}\0${layout}\0${diagrams[index].code}`
+    const key = `${theme}\0${layout}\0${JSON.stringify(nodeSizing)}\0${diagrams[index].code}`
     if (!renderedByKey.has(key)) {
       try {
-        const rendered = await renderMermaidDiagram(diagrams[index].code, theme, layout)
+        const rendered = await renderMermaidDiagram(diagrams[index].code, theme, layout, nodeSizing)
         renderedByKey.set(key, rendered.svg)
       } catch {
         renderedByKey.set(key, null)

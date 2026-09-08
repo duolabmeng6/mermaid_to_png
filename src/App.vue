@@ -55,6 +55,7 @@ const code = ref(readStoredCode())
 const storedSettings = readStoredSettings()
 const theme = ref<MermaidTheme>(storedSettings.theme)
 const layout = ref<DiagramLayout>(storedSettings.layout)
+const nodeSizing = ref(storedSettings.nodeSizing)
 const background = ref<ExportBackground>(storedSettings.background)
 const pngScale = ref<PngScale>(storedSettings.pngScale)
 const pngPadding = ref<PngPadding>(storedSettings.pngPadding)
@@ -78,6 +79,7 @@ const { svgMarkup, errorMessage, isRendering, dimensions } = useMermaidRenderer(
   activeDiagramCode,
   theme,
   layout,
+  nodeSizing,
 )
 
 const displayedErrorMessage = computed(() => {
@@ -113,13 +115,14 @@ watch(
   },
 )
 
-watch([theme, layout, background, pngScale, pngPadding], () => {
+watch([theme, layout, nodeSizing, background, pngScale, pngPadding], () => {
   try {
     localStorage.setItem(
       SETTINGS_STORAGE_KEY,
       JSON.stringify({
         theme: theme.value,
         layout: layout.value,
+        nodeSizing: nodeSizing.value,
         background: background.value,
         pngScale: pngScale.value,
         pngPadding: pngPadding.value,
@@ -223,6 +226,7 @@ async function exportAllAsZip() {
   const batch = [...diagrams.value]
   const selectedTheme = theme.value
   const selectedLayout = layout.value
+  const selectedNodeSizing = { ...nodeSizing.value }
   const selectedScale = pngScale.value
   const selectedBackground = backgroundColor.value
   const selectedPadding = pngPadding.value
@@ -242,7 +246,7 @@ async function exportAllAsZip() {
       batchProgress.value.current = index + 1
 
       try {
-        const rendered = await renderMermaidDiagram(diagram.code, selectedTheme, selectedLayout)
+        const rendered = await renderMermaidDiagram(diagram.code, selectedTheme, selectedLayout, selectedNodeSizing)
         const { blob } = await createPngBlob(
           rendered.svg,
           selectedScale,
@@ -616,6 +620,7 @@ function isLocalStorageAvailable(): boolean {
 function readStoredSettings(): {
   theme: MermaidTheme
   layout: DiagramLayout
+  nodeSizing: { width: number | null; padding: number | null }
   background: ExportBackground
   pngScale: PngScale
   pngPadding: PngPadding
@@ -623,6 +628,7 @@ function readStoredSettings(): {
   const fallback = {
     theme: 'default' as const,
     layout: 'source' as const,
+    nodeSizing: { width: null, padding: null },
     background: 'theme' as const,
     pngScale: 3 as const,
     pngPadding: 32 as const,
@@ -638,7 +644,11 @@ function readStoredSettings(): {
     const validScales: PngScale[] = [1, 2, 3, 4]
     const validPaddings: PngPadding[] = [0, 16, 32, 48, 64]
 
+    const sizing = value.nodeSizing as { width?: unknown; padding?: unknown } | undefined
+    const validSize = (size: unknown, min: number, max: number) =>
+      typeof size === 'number' && Number.isFinite(size) && size >= min && size <= max ? size : null
     return {
+      nodeSizing: { width: validSize(sizing?.width, 40, 2000), padding: validSize(sizing?.padding, 0, 100) },
       theme: isMermaidTheme(value.theme) ? value.theme : fallback.theme,
       layout: validLayouts.includes(value.layout as DiagramLayout)
         ? (value.layout as DiagramLayout)
@@ -760,6 +770,7 @@ onBeforeUnmount(() => {
           :diagrams="diagrams"
           :theme="theme"
           :layout="layout"
+          :node-sizing="nodeSizing"
           :background-color="backgroundColor"
           :is-exporting="isExporting"
         />
@@ -767,6 +778,7 @@ onBeforeUnmount(() => {
         <MermaidPreview
           v-model:theme="theme"
           v-model:layout="layout"
+          v-model:node-sizing="nodeSizing"
           v-model:background="background"
           v-model:png-scale="pngScale"
           v-model:png-padding="pngPadding"
