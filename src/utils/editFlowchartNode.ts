@@ -329,6 +329,56 @@ export function deleteFlowchartNodes(source: string, nodeIds: string[]): string 
   return nextSource
 }
 
+/** Resolve the exact operator without rewriting nodes, comments or other edges. */
+function edgeLabelRange(source: string, edge: FlowchartEdge) {
+  if (!isFlowchartSource(source)) return null
+  let occurrence = 0
+  const wanted = edge.occurrence ?? 0
+  if (!Number.isSafeInteger(wanted) || wanted < 0) return null
+  for (const match of source.matchAll(/[^\r\n]+/g)) {
+    const line = match[0]
+    if (match.index! < (source.search(FLOWCHART_HEADER_PATTERN)) || isInsideQuotedText(source, match.index!) || IGNORED_LINE_PATTERN.test(line)) continue
+    const code = line.slice(0, findUnquotedToken(line, '%%'))
+    let offset = match.index!
+    for (const segment of splitUnquoted(code, ';')) {
+      const tokens = findFlowchartNodeTokens(segment)
+      for (const from of tokens) {
+        if (from.id !== edge.fromNodeId) continue
+        for (const to of tokens) {
+          if (to.start <= from.end || to.id !== edge.toNodeId) continue
+          const between = segment.slice(from.end, to.start)
+          const operator = between.trim()
+          // Inline labels use two halves; canonical pipe labels use one operator.
+          const plain = operator.match(/^([<ox]?[-.=~]{2,}[>ox]?)(?:\s*\|("[^"\r\n]*"|[^|\r\n]*)\|)?$/)
+          const inline = plain ? null : operator.match(/^([<ox]?[-.=]{2,})\s+([^\r\n]+?)\s+([-.=]{1,}[>ox]?)$/)
+          if (!plain && !inline) continue
+          const arrow = plain ? plain[1] : inline![1] + inline![3].slice(inline![3].startsWith('.') ? 1 : 2)
+          const rawLabel = plain ? plain[2] ?? '' : inline![2]
+          if (occurrence++ === wanted) return {
+            start: offset + from.end + between.indexOf(operator),
+            end: offset + from.end + between.indexOf(operator) + operator.length,
+            arrow, label: decodeLabel(rawLabel).replace(/#124;/g, '|'),
+          }
+        }
+      }
+      offset += segment.length + 1
+    }
+  }
+  return null
+}
+
+export function getFlowchartEdgeLabel(source: string, edge: FlowchartEdge): string | null {
+  return edgeLabelRange(source, edge)?.label ?? null
+}
+
+export function updateFlowchartEdgeLabel(source: string, edge: FlowchartEdge, label: string): string | null {
+  const range = edgeLabelRange(source, edge)
+  if (!range || label.length > 5000) return null
+  const encoded = encodeLabel(label).replace(/\|/g, '#124;')
+  const replacement = range.arrow + (label.trim() ? `|"${encoded}"|` : '')
+  return source.slice(0, range.start) + replacement + source.slice(range.end)
+}
+
 export function deleteFlowchartEdge(
   source: string,
   fromNodeId: string,

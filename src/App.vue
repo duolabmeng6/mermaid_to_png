@@ -27,6 +27,8 @@ import {
 import { extractMermaidBlocks } from './utils/extractMermaidBlocks'
 import {
   deleteFlowchartEdge,
+  updateFlowchartEdgeLabel,
+  type FlowchartEdge,
   deleteFlowchartNode,
   deleteFlowchartNodes,
   insertFlowchartEdge,
@@ -516,6 +518,16 @@ function deleteNodes(nodeIds: string[]) {
   )
 }
 
+function editEdgeLabel(edge: FlowchartEdge, label: string) {
+  const diagram = activeDiagram.value
+  if (!diagram) return
+  const updated = updateFlowchartEdgeLabel(diagram.code, edge, label)
+  const document = updated === null ? null : replaceMermaidBlockCode(code.value, diagram, updated)
+  if (document === null) { showToast('无法安全修改这条连线，请重新打开编辑。', 'error'); return }
+  code.value = document
+  showToast('连接线文字已更新，可撤销。', 'success')
+}
+
 function deleteEdge(fromNodeId: string, toNodeId: string, occurrence = 0) {
   const diagram = activeDiagram.value
   if (!diagram) return
@@ -869,6 +881,7 @@ onBeforeUnmount(() => {
           @delete-node="deleteNode"
           @delete-nodes="deleteNodes"
           @delete-edge="deleteEdge"
+          @edit-edge-label="editEdgeLabel"
           @connect-nodes="connectNodes"
           @reorder-node="reorderNode"
           @shift-node="shiftNode"

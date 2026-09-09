@@ -63,6 +63,8 @@ import PngExportPreview from './PngExportPreview.vue'
 import NodeAppearanceDialog from './NodeAppearanceDialog.vue'
 import MindmapOutline from './MindmapOutline.vue'
 import NodeAnnotationDialog from './NodeAnnotationDialog.vue'
+import EdgeLabelDialog from './EdgeLabelDialog.vue'
+const edgeLabelDialog = ref<InstanceType<typeof EdgeLabelDialog> | null>(null)
 import { readFlowchartNodeAnnotation, type NodeAnnotation } from '../utils/nodeAnnotation'
 import { isComposingKey, resolveHistoryNode, type HistoryNodeAnchor } from '../utils/editorInteraction'
 import type { NodeAppearance } from '../utils/nodeAppearance'
@@ -185,6 +187,7 @@ const emit = defineEmits<{
   ]
   deleteNode: [nodeId: string]
   deleteNodes: [nodeIds: string[]]
+  editEdgeLabel: [edge: FlowchartEdge, label: string]
   deleteEdge: [fromNodeId: string, toNodeId: string, occurrence: number]
   connectNodes: [fromNodeId: string, toNodeId: string]
   reorderNode: [nodeId: string, targetNodeId: string]
@@ -1162,12 +1165,23 @@ function openNodeInspector() {
   })
 }
 
+function openEdgeLabelEditor(edge: FlowchartEdge) {
+  const targets = diagramElement.value?.querySelectorAll<SVGElement>('.is-edge-label-editable, path.is-edge-editable') ?? []
+  const matches = [...targets].filter(el => el.dataset.fromNodeId === edge.fromNodeId && el.dataset.toNodeId === edge.toNodeId && Number(el.dataset.edgeOccurrence ?? 0) === (edge.occurrence ?? 0))
+  const anchor = matches.find(el => el.classList.contains('is-edge-label-editable')) ?? matches[0]
+  closeContextMenu()
+  if (anchor) edgeLabelDialog.value?.open(edge, anchor)
+}
+
 function handlePreviewDoubleClick(event: MouseEvent) {
-  if (connectionMode.value || sortMode.value) return
+  if (connectionMode.value || sortMode.value || !isDiagramInteractionCurrent()) return
   const node = getEditableNode(event.target)
-  if (!node) return
+  if (node) { event.preventDefault(); closeContextMenu(); openNodeEditor(node); return }
+  const edge = getEditableEdge(event.target) ?? getNearestEditableEdge(event.clientX, event.clientY)
+  if (!edge) return
   event.preventDefault()
-  openNodeEditor(node)
+  closeContextMenu()
+  openEdgeLabelEditor(edge.edge)
 }
 
 function closeNodeEditor() {
@@ -1306,7 +1320,7 @@ function handlePreviewContextMenu(event: MouseEvent) {
   if (event.target.closest('a, button, input, select, textarea')) return
 
   const editableEdge =
-    getNearestEditableEdge(event.clientX, event.clientY) ?? getEditableEdge(event.target)
+    getEditableEdge(event.target) ?? getNearestEditableEdge(event.clientX, event.clientY)
   if (editableEdge) {
     clearNodeSelection()
     event.preventDefault()
@@ -1679,16 +1693,26 @@ function prepareEditableEdges(nodeIds: string[]) {
     hitArea.setAttribute('role', 'button')
     hitArea.setAttribute(
       'aria-label',
-      `连线：${edge.fromNodeId} 到 ${edge.toNodeId}${parallelCount > 1 ? `；第 ${occurrence + 1} 条同向连线` : ''}；按 Shift+F10 打开删除菜单`,
+      `连线：${edge.fromNodeId} 到 ${edge.toNodeId}${parallelCount > 1 ? `；第 ${occurrence + 1} 条同向连线` : ''}；双击编辑文字；按 Shift+F10 打开连线菜单`,
     )
     path.after(hitArea)
+    // Mermaid labels reference their path via data-id (including parallel edges).
+    for (const label of diagram?.querySelectorAll<SVGGElement>('.edgeLabel .label[data-id]') ?? []) {
+      if (label.dataset.id !== path.dataset.id && label.dataset.id !== path.id) continue
+      const target = label.closest<SVGGElement>('g.edgeLabel') ?? label
+      Object.assign(target.dataset, hitArea.dataset)
+      target.classList.add('is-edge-label-editable')
+      target.setAttribute('role', 'button')
+      target.setAttribute('tabindex', '0')
+      target.setAttribute('aria-label', `编辑连接线文字：${label.textContent}`)
+    }
   }
 }
 
-function getEditableEdge(target: EventTarget | null): { element: SVGPathElement; edge: FlowchartEdge } | null {
+function getEditableEdge(target: EventTarget | null): { element: SVGElement; edge: FlowchartEdge } | null {
   if (!(target instanceof Element)) return null
-  const element = target.closest<SVGPathElement>(
-    'path.is-edge-editable[data-from-node-id][data-to-node-id], path.edge-hit-area[data-from-node-id][data-to-node-id]',
+  const element = target.closest<SVGElement>(
+    'g.is-edge-label-editable, path.is-edge-editable[data-from-node-id][data-to-node-id], path.edge-hit-area[data-from-node-id][data-to-node-id]',
   )
   const fromNodeId = element?.dataset.fromNodeId
   const toNodeId = element?.dataset.toNodeId
@@ -1709,11 +1733,11 @@ function getEditableEdge(target: EventTarget | null): { element: SVGPathElement;
 function getNearestEditableEdge(
   clientX: number,
   clientY: number,
-): { element: SVGPathElement; edge: FlowchartEdge } | null {
+): { element: SVGElement; edge: FlowchartEdge } | null {
   const paths = diagramElement.value?.querySelectorAll<SVGPathElement>(
     'path.is-edge-editable[data-from-node-id][data-to-node-id]',
   ) ?? []
-  let nearest: { element: SVGPathElement; edge: FlowchartEdge; distance: number } | null = null
+  let nearest: { element: SVGElement; edge: FlowchartEdge; distance: number } | null = null
 
   for (const path of paths) {
     const rect = path.getBoundingClientRect()
@@ -1920,6 +1944,11 @@ function handlePreviewKeydown(event: KeyboardEvent) {
     event.preventDefault()
     cancelSortDrag()
     return
+  }
+
+  if (event.key === 'Enter' && !event.ctrlKey && !event.metaKey && isDiagramInteractionCurrent()) {
+    const edge = getEditableEdge(event.target)
+    if (edge) { event.preventDefault(); openEdgeLabelEditor(edge.edge); return }
   }
 
   if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
@@ -2546,6 +2575,8 @@ onBeforeUnmount(() => {
         }}
       </p>
       <template v-if="contextMenu.edge">
+        <button class="diagram-context-menu__item" type="button" role="menuitem"
+          @click="openEdgeLabelEditor(contextMenu.edge)"><span aria-hidden="true">✎</span><span>编辑连接线文字</span></button>
         <button
           class="diagram-context-menu__item diagram-context-menu__item--danger"
           type="button"
@@ -2691,6 +2722,7 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
+    <EdgeLabelDialog ref="edgeLabelDialog" :source="activeDiagramCode" @apply="(edge, label) => emit('editEdgeLabel', edge, label)" />
     <NodeAnnotationDialog ref="nodeAnnotationDialog" :source="activeDiagramCode"
       @apply="(id, value) => emit('annotateNode', id, value)" @closed="schedulePendingNodeFocusRestore" />
 
@@ -3861,4 +3893,9 @@ onBeforeUnmount(() => {
 .preview-panel.is-fallback-fullscreen .theme-warning {
   white-space: nowrap;
 }
+</style>
+
+<style scoped>
+.diagram :deep(.is-edge-label-editable) { cursor: text; pointer-events: all; }
+.diagram :deep(.is-edge-label-editable:hover) { filter: brightness(.88); }
 </style>

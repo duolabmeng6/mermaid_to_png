@@ -115,7 +115,8 @@ export const mermaidThemePresets: readonly MermaidThemePreset[] = [
     mermaidTheme: 'base',
     backgroundColor: '#f8fafc',
     palette: ['#dbeafe', '#e0f2fe', '#2563eb'],
-    themeVariables: createCustomTheme({
+    themeVariables: {
+      ...createCustomTheme({
       background: '#f8fafc',
       primary: '#dbeafe',
       secondary: '#e0f2fe',
@@ -124,7 +125,17 @@ export const mermaidThemePresets: readonly MermaidThemePreset[] = [
       text: '#172554',
       line: '#475569',
       cluster: '#f1f5f9',
-    }),
+      }),
+      // Mindmap uses its own color scale instead of flowchart node colors.
+      cScale0: '#dbeafe', cScale1: '#ccfbf1', cScale2: '#e0e7ff',
+      cScale3: '#e0f2fe', cScale4: '#ede9fe', cScale5: '#dcfce7',
+      cScale6: '#dbeafe', cScale7: '#ccfbf1', cScale8: '#e0e7ff',
+      cScale9: '#e0f2fe', cScale10: '#ede9fe', cScale11: '#dcfce7',
+      cScaleLabel0: '#172554', cScaleLabel1: '#134e4a', cScaleLabel2: '#312e81',
+      cScaleLabel3: '#0c4a6e', cScaleLabel4: '#4c1d95', cScaleLabel5: '#14532d',
+      cScaleLabel6: '#172554', cScaleLabel7: '#134e4a', cScaleLabel8: '#312e81',
+      cScaleLabel9: '#0c4a6e', cScaleLabel10: '#4c1d95', cScaleLabel11: '#14532d',
+    },
   },
   {
     id: 'twilight-violet',

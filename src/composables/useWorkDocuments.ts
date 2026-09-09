@@ -67,7 +67,7 @@ function addDocument(document: WorkDocument) {
   persist()
 }
 function newDocument() {
-  addDocument(createWorkDocument({ ...props.content, code: 'mindmap\n  root((中心主题))\n    分支一\n    分支二' }, '新脑图'))
+  addDocument(createWorkDocument({ ...props.content, settings: { ...props.content.settings, theme: 'business-blue' }, code: 'mindmap\n  root((中心主题))\n    分支一\n    分支二' }, '新脑图'))
 }
 function duplicate() {
   addDocument(createWorkDocument(props.content, `${active.value?.title || '文档'} 副本`))
