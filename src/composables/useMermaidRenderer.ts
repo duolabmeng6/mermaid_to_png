@@ -7,6 +7,7 @@ import { applyDiagramLayout, type DiagramLayout } from '../utils/applyDiagramLay
 import { getAppearanceConfig, readDiagramAppearance, type NodeSizing } from '../utils/diagramAppearance'
 export type { NodeSizing } from '../utils/diagramAppearance'
 import { getSvgDimensions } from '../utils/exportDiagram'
+import { isMindmapSource } from '../utils/editMindmapNode'
 
 const FONT_FAMILY =
   '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", Arial, sans-serif'
@@ -30,7 +31,10 @@ export function renderMermaidDiagram(
   const appearanceSnapshot = readDiagramAppearance(nodeSizing)
   const priorities = { preview: 30, export: 20, thumbnail: 10 }
   return renderQueue.enqueue(
-    () => renderDiagram(applyDiagramLayout(source, layout), selectedTheme, appearanceSnapshot),
+    () => renderDiagram(applyDiagramLayout(source, layout), selectedTheme, appearanceSnapshot,
+      isMindmapSource(source) && (layout === 'radial' || layout === 'tree')
+        ? { layoutAlgorithm: layout === 'tree' ? 'dagre' : 'cose-bilkent' }
+        : undefined),
     priorities[options.priority ?? 'preview'], options.signal,
   )
 }
@@ -124,11 +128,13 @@ async function renderDiagram(
   source: string,
   selectedTheme: MermaidTheme,
   nodeSizing: NodeSizing,
+  mindmapLayout: { layoutAlgorithm: string } | undefined = undefined,
 ): Promise<RenderedMermaidDiagram> {
   const selectedPreset = getThemePreset(selectedTheme)
   const appearance = getAppearanceConfig(nodeSizing)
   mermaid.initialize({
     ...appearance,
+    ...(mindmapLayout ? { layout: mindmapLayout.layoutAlgorithm } : {}),
     startOnLoad: false,
     securityLevel: 'strict',
     suppressErrorRendering: true,
@@ -148,7 +154,7 @@ async function renderDiagram(
       useMaxWidth: true,
       ...appearance.flowchart,
     },
-    mindmap: appearance.mindmap,
+    mindmap: { ...appearance.mindmap, ...mindmapLayout },
     sequence: {
       useMaxWidth: true,
     },

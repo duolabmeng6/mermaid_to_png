@@ -716,7 +716,7 @@ function readStoredSettings(): {
       unknown
     >
     const validBackgrounds: ExportBackground[] = ['theme', 'white', 'transparent']
-    const validLayouts: DiagramLayout[] = ['source', 'horizontal', 'vertical']
+    const validLayouts: DiagramLayout[] = ['source', 'horizontal', 'vertical', 'radial', 'tree']
     const validScales: PngScale[] = [1, 2, 3, 4]
     const validPaddings: PngPadding[] = [0, 16, 32, 48, 64]
 

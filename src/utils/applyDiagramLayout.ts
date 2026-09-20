@@ -1,4 +1,4 @@
-export type DiagramLayout = 'source' | 'horizontal' | 'vertical'
+export type DiagramLayout = 'source' | 'horizontal' | 'vertical' | 'radial' | 'tree'
 
 const declarationPattern = /^(\uFEFF?[ \t]*(?:flowchart|graph))(?:(?:[ \t]+)(?:TB|TD|BT|RL|LR))?([ \t]*)(?=;|%%|$)/
 const directionPattern = /^([ \t]*direction[ \t]+)(?:TB|TD|BT|RL|LR)(?=[ \t]*(?:%%.*)?$)/
@@ -14,7 +14,7 @@ interface LayoutScanState {
 }
 
 export function applyDiagramLayout(source: string, layout: DiagramLayout): string {
-  if (layout === 'source') return source
+  if (layout === 'source' || layout === 'radial' || layout === 'tree') return source
 
   const parts = source.split(/(\r\n|\n|\r)/)
   const declarationIndex = findDeclarationIndex(parts)

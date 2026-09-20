@@ -7,7 +7,6 @@ import {
   FileArchive,
   FileDown,
   Image as ImageIcon,
-  ImageDown,
   Info,
   LoaderCircle,
   ListPlus,
@@ -232,6 +231,7 @@ const isDraggingPreview = ref(false)
 const nativeFullscreenActive = ref(false)
 const fallbackFullscreenActive = ref(false)
 const fullscreenBusy = ref(false)
+const fullscreenHeaderHidden = ref(false)
 const isFullscreen = computed(
   () => nativeFullscreenActive.value || fallbackFullscreenActive.value,
 )
@@ -241,6 +241,7 @@ const canDeleteSelectedNodes = computed(() => {
   return ids.length > 1 && !(isMindmapDiagram.value && ids.includes('node_0'))
 })
 let previousBodyOverflow = ''
+let fullscreenHeaderTimer: number | undefined
 let previewDragState: PreviewDragState | null = null
 let zoomAnchorRevision = 0
 let contextMenuInvoker: HTMLElement | SVGElement | null = null
@@ -323,6 +324,10 @@ const showDarkBackgroundWarning = computed(
   () => isDarkMermaidTheme(props.theme) && props.background !== 'theme',
 )
 const isMindmapDiagram = computed(() => isMindmapSource(props.activeDiagramCode))
+const displayedLayout = computed(() => {
+  if (isMindmapDiagram.value) return props.layout === 'tree' || props.layout === 'radial' ? props.layout : 'source'
+  return props.layout === 'horizontal' || props.layout === 'vertical' ? props.layout : 'source'
+})
 const mindmapNodeOptions = computed(() => {
   if (!isMindmapDiagram.value) return []
   return getMindmapNodeStructure(props.activeDiagramCode)
@@ -1834,6 +1839,7 @@ async function toggleFullscreen() {
   if (!panel || fullscreenBusy.value) return
 
   if (fallbackFullscreenActive.value) {
+    stopFullscreenHeaderTimer()
     exitFallbackFullscreen()
     return
   }
@@ -1855,6 +1861,7 @@ async function toggleFullscreen() {
     try {
       if (document.fullscreenElement) await document.exitFullscreen()
       await panel.requestFullscreen()
+      startFullscreenHeaderTimer()
       return
     } catch {
       // 嵌入式浏览器可能禁止原生全屏，下面自动使用沉浸模式。
@@ -1870,6 +1877,7 @@ function enterFallbackFullscreen() {
   if (fallbackFullscreenActive.value) return
   previousBodyOverflow = document.body.style.overflow
   document.body.style.overflow = 'hidden'
+  startFullscreenHeaderTimer()
   fallbackFullscreenActive.value = true
   window.addEventListener('keydown', handleFallbackFullscreenKeydown)
   resetPreviewAfterLayout(true)
@@ -1878,6 +1886,7 @@ function enterFallbackFullscreen() {
 function exitFallbackFullscreen() {
   if (!fallbackFullscreenActive.value) return
   fallbackFullscreenActive.value = false
+  stopFullscreenHeaderTimer()
   document.body.style.overflow = previousBodyOverflow
   window.removeEventListener('keydown', handleFallbackFullscreenKeydown)
   resetPreviewAfterLayout(false)
@@ -1893,9 +1902,35 @@ function syncFullscreenState() {
   closeContextMenu()
   const wasFullscreen = nativeFullscreenActive.value
   nativeFullscreenActive.value = document.fullscreenElement === previewPanel.value
+  if (nativeFullscreenActive.value) {
+    startFullscreenHeaderTimer()
+  } else {
+    stopFullscreenHeaderTimer()
+  }
 
   if (nativeFullscreenActive.value) resetPreviewAfterLayout(true)
   else if (wasFullscreen) resetPreviewAfterLayout(false)
+}
+
+function stopFullscreenHeaderTimer() {
+  window.clearTimeout(fullscreenHeaderTimer)
+  fullscreenHeaderTimer = undefined
+  fullscreenHeaderHidden.value = false
+}
+
+function startFullscreenHeaderTimer() {
+  window.clearTimeout(fullscreenHeaderTimer)
+  fullscreenHeaderHidden.value = false
+  if (!isFullscreen.value) return
+  fullscreenHeaderTimer = window.setTimeout(() => {
+    fullscreenHeaderHidden.value = true
+    fullscreenHeaderTimer = undefined
+  }, 5_000)
+}
+
+function handleFullscreenHeaderPointerMove() {
+  if (!isFullscreen.value) return
+  startFullscreenHeaderTimer()
 }
 
 function resetPreviewAfterLayout(focusStage: boolean) {
@@ -2132,6 +2167,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointercancel', handlePreviewPointerCancel, true)
   window.removeEventListener('resize', handleWindowResize)
   window.removeEventListener('blur', handleWindowBlur)
+  stopFullscreenHeaderTimer()
   if (fallbackFullscreenActive.value) {
     document.body.style.overflow = previousBodyOverflow
     window.removeEventListener('keydown', handleFallbackFullscreenKeydown)
@@ -2143,7 +2179,10 @@ onBeforeUnmount(() => {
   <section
     ref="previewPanel"
     class="panel preview-panel"
-    :class="{ 'is-fallback-fullscreen': fallbackFullscreenActive }"
+    :class="{
+      'is-fallback-fullscreen': fallbackFullscreenActive,
+      'is-fullscreen-header-hidden': isFullscreen && fullscreenHeaderHidden,
+    }"
     aria-labelledby="preview-title"
   >
     <Teleport defer to="#app-shortcut-host">
@@ -2201,7 +2240,7 @@ onBeforeUnmount(() => {
       </details>
     </Teleport>
 
-    <header class="panel-header preview-header">
+    <header class="panel-header preview-header" @pointermove="handleFullscreenHeaderPointerMove">
       <div class="panel-title-wrap">
         <span class="panel-icon panel-icon--blue"><ImageIcon :size="18" /></span>
         <div>
@@ -2262,18 +2301,10 @@ onBeforeUnmount(() => {
           <FileDown v-else :size="16" />
           导出 SVG
         </button>
-        <PngExportPreview :svg="svgMarkup" :scale="pngScale" :padding="pngPadding"
-          :background-color="backgroundColor" :disabled="!canExport || Boolean(pngSizeError)" />
-        <button
-          class="button button--primary"
-          type="button"
-          :disabled="!canExport || Boolean(pngSizeError)"
-          @click="emit('exportPng')"
-        >
-          <LoaderCircle v-if="exportingType === 'png'" class="spinning" :size="16" />
-          <ImageDown v-else :size="16" />
-          导出 PNG
-        </button>
+        <PngExportPreview :svg="svgMarkup" :dimensions="dimensions" :scale="pngScale" :padding="pngPadding"
+          :background-color="backgroundColor" :disabled="!canExport"
+          @update:scale="emit('update:pngScale', $event)"
+          @update:padding="emit('update:pngPadding', $event)" />
         <button
           v-if="diagramCount > 1"
           class="button button--secondary"
@@ -2324,10 +2355,17 @@ onBeforeUnmount(() => {
 
       <label class="select-control">
         <span>排版</span>
-        <select aria-label="流程图排版" :value="layout" @change="updateLayout">
-          <option value="source">跟随代码</option>
-          <option value="horizontal">横版</option>
-          <option value="vertical">竖版</option>
+        <select :aria-label="isMindmapDiagram ? '脑图布局' : '流程图排版'" :value="displayedLayout" @change="updateLayout">
+          <template v-if="isMindmapDiagram">
+            <option value="source">跟随代码</option>
+            <option value="radial">放射状</option>
+            <option value="tree">树状</option>
+          </template>
+          <template v-else>
+            <option value="source">跟随代码</option>
+            <option value="horizontal">横版</option>
+            <option value="vertical">竖版</option>
+          </template>
         </select>
       </label>
 
@@ -2346,27 +2384,6 @@ onBeforeUnmount(() => {
           <option value="theme">跟随主题</option>
           <option value="white">纯白色</option>
           <option value="transparent">透明</option>
-        </select>
-      </label>
-
-      <label class="select-control select-control--scale">
-        <span>PNG 清晰度</span>
-        <select aria-label="PNG 清晰度" :value="pngScale" @change="updatePngScale">
-          <option :value="1">1× 标准</option>
-          <option :value="2">2× 高清</option>
-          <option :value="3">3× 超清</option>
-          <option :value="4">4× 极清</option>
-        </select>
-      </label>
-
-      <label class="select-control">
-        <span>PNG 留白</span>
-        <select aria-label="PNG 四周留白" :value="pngPadding" @change="updatePngPadding">
-          <option :value="0">无留白</option>
-          <option :value="16">16px 紧凑</option>
-          <option :value="32">32px 适中</option>
-          <option :value="48">48px 宽松</option>
-          <option :value="64">64px 加宽</option>
         </select>
       </label>
 
@@ -2921,6 +2938,42 @@ onBeforeUnmount(() => {
 .preview-panel.is-fallback-fullscreen .preview-header,
 .preview-panel.is-fallback-fullscreen .settings-bar {
   padding-inline: 22px;
+}
+
+/* 全屏预览时标题栏 10 秒无操作自动淡出；顶部透明区域仍可感应鼠标移动。 */
+.preview-panel:fullscreen .preview-header,
+.preview-panel.is-fallback-fullscreen .preview-header {
+  transition: opacity 180ms ease;
+}
+
+.preview-panel.is-fullscreen-header-hidden .preview-header {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 5;
+  box-sizing: border-box;
+  width: 100%;
+  height: 48px;
+  opacity: 0;
+  pointer-events: auto;
+}
+
+.preview-panel.is-fullscreen-header-hidden .settings-bar {
+  position: absolute;
+  top: 48px;
+  right: 0;
+  left: 0;
+  z-index: 4;
+  box-sizing: border-box;
+  width: 100%;
+  height: 44px;
+  min-height: 44px;
+  max-height: 44px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.preview-panel.is-fullscreen-header-hidden .preview-header:hover {
+  opacity: 1;
 }
 
 .fold-notice { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-secondary); }

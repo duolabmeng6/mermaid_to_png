@@ -67,7 +67,21 @@ function addDocument(document: WorkDocument) {
   persist()
 }
 function newDocument() {
-  addDocument(createWorkDocument({ ...props.content, settings: { ...props.content.settings, theme: 'business-blue' }, code: 'mindmap\n  root((中心主题))\n    分支一\n    分支二' }, '新脑图'))
+  addDocument(createWorkDocument({
+    ...props.content,
+    // Keep the UI in "follow code" mode; the code itself selects the tree layout.
+    settings: { ...props.content.settings, theme: 'business-blue', layout: 'source' },
+    code: `\`\`\`mermaid
+---
+config:
+  layout: dagre
+---
+mindmap
+  root((中心主题))
+    分支一
+    分支二
+\`\`\``,
+  }, '新脑图'))
 }
 function duplicate() {
   addDocument(createWorkDocument(props.content, `${active.value?.title || '文档'} 副本`))

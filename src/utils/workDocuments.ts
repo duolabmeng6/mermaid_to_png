@@ -24,7 +24,7 @@ export function parseDocumentContent(value: unknown): DocumentContent {
   if (!value || typeof value !== 'object') return fail()
   const { code, settings } = value as DocumentContent
   if (typeof code !== 'string' || code.length > MAX_DOCUMENT_FILE_BYTES || !settings || typeof settings !== 'object') return fail()
-  if (!isMermaidTheme(settings.theme) || !['source', 'horizontal', 'vertical'].includes(settings.layout) ||
+  if (!isMermaidTheme(settings.theme) || !['source', 'horizontal', 'vertical', 'radial', 'tree'].includes(settings.layout) ||
       !['theme', 'white', 'transparent'].includes(settings.background) ||
       ![1, 2, 3, 4].includes(settings.pngScale) || ![0, 16, 32, 48, 64].includes(settings.pngPadding)) return fail()
   const sizing = readDiagramAppearance(settings.nodeSizing)
